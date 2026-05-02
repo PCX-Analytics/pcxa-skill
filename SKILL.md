@@ -8,9 +8,15 @@ disable-model-invocation: false
 
 # PCXA CLI
 
-**Tool:** `python .claude/skills/pcxa/pcxa.py`
+**Tool:** `pcxa` (or `python .claude/skills/pcxa/pcxa.py` if not pipx-installed)
 
 All commands output JSON by default. Use `-f table` for human-readable. Use `--dry-run` on write operations. Run `pcxa <command> --help` for full options.
+
+If `pcxa` is not on PATH, ask the user to install it once with:
+```
+pipx install git+https://github.com/pcuriel19/pcxa-skill.git
+```
+Then `pcxa update` self-updates from GitHub. The CLI prints a one-line notice to stderr (max once per 24h) when a newer release is available.
 
 ## Setup & Authentication
 
@@ -458,4 +464,4 @@ When a PCXa CLI command returns a non-2xx API response (403, 500, unexpected 400
 
 ## Invocation
 
-`/pcxa $ARGUMENTS` → `python .claude/skills/pcxa/pcxa.py $ARGUMENTS`
+`/pcxa $ARGUMENTS` → `pcxa $ARGUMENTS` (if installed via pipx) or `python .claude/skills/pcxa/pcxa.py $ARGUMENTS`

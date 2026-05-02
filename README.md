@@ -14,25 +14,45 @@ It depends only on the `requests` library.
 
 ## Install
 
-Drop the skill into your Claude Code skills directory.
+There are two install vectors — pick one or do both.
 
-**User-level (available in every project):**
+### 1. CLI on PATH (recommended)
 
-```bash
-git clone https://github.com/pcuriel19/pcxa-skill.git ~/.claude/skills/pcxa
-```
-
-**Project-level (only in this repo):**
+Use [pipx](https://pypa.github.io/pipx/) so the CLI lives in its own venv and
+`pcxa` is callable everywhere:
 
 ```bash
-git clone https://github.com/pcuriel19/pcxa-skill.git .claude/skills/pcxa
+pipx install git+https://github.com/pcuriel19/pcxa-skill.git
+pcxa --version
 ```
 
-Make sure `requests` is available on your Python:
+After install, `pcxa update` self-upgrades from GitHub. The CLI also prints a
+one-line notice to stderr (max once every 24 hours) when a newer release is
+out. Disable with `PCXA_NO_UPDATE_CHECK=1` in your environment.
+
+For local development:
 
 ```bash
-pip install requests
+git clone https://github.com/pcuriel19/pcxa-skill.git ~/pcxa-skill
+pipx install -e ~/pcxa-skill        # edits to ~/pcxa-skill take effect immediately
 ```
+
+### 2. Claude Code skill
+
+For Claude Code to discover the skill, `SKILL.md` must live at
+`~/.claude/skills/pcxa/SKILL.md`. The simplest pattern (especially if you
+have multiple repos and want one source of truth) is a symlink to a single
+git checkout:
+
+```bash
+git clone https://github.com/pcuriel19/pcxa-skill.git ~/pcxa-skill
+ln -s ~/pcxa-skill ~/.claude/skills/pcxa
+```
+
+A `git pull` in `~/pcxa-skill` updates the skill everywhere it's symlinked.
+
+If you want the skill scoped to a single project instead, symlink (or clone)
+into that project's `.claude/skills/pcxa/`.
 
 That's it — Claude Code picks up the skill automatically. Inside Claude, type
 `/pcxa` to invoke it, or just ask Claude to do something on your PCXA project
@@ -43,7 +63,7 @@ and it will reach for the skill.
 From a terminal (not from Claude), log in once:
 
 ```bash
-python ~/.claude/skills/pcxa/pcxa.py login
+pcxa login
 ```
 
 This opens `pcxa.app` in your browser. Sign in normally (MFA, SSO supported);
@@ -53,7 +73,7 @@ terminal.
 Fallback if browser login isn't available:
 
 ```bash
-python ~/.claude/skills/pcxa/pcxa.py setup -u you@example.com
+pcxa setup -u you@example.com
 ```
 
 ## Per-repo sessions

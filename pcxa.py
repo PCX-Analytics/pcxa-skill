@@ -34,6 +34,7 @@ import argparse
 import datetime
 import difflib
 import json
+import os
 import sys
 import textwrap
 import time
@@ -48,10 +49,16 @@ except ImportError:
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
+__version__ = "0.2.0"
+
 GLOBAL_CONFIG_DIR = Path.home() / ".file_explorer"
 GLOBAL_CONFIG_FILE = GLOBAL_CONFIG_DIR / "config.json"
 LOCAL_CONFIG_NAME = ".pcxa"  # repo-level project override (committed)
 LOCAL_CREDENTIALS_NAME = ".pcxa-credentials.json"  # repo-level credentials (gitignored)
+UPDATE_CHECK_FILE = GLOBAL_CONFIG_DIR / "last_update_check.json"
+UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+GITHUB_RELEASES_URL = "https://api.github.com/repos/pcuriel19/pcxa-skill/releases/latest"
+GITHUB_REPO_URL = "https://github.com/pcuriel19/pcxa-skill.git"
 
 KNOWN_FILE_TYPES = [
     "PDF", "DOC", "DOCX", "XLS", "XLSX", "PPT", "PPTX", "TXT", "CSV",
@@ -2594,6 +2601,7 @@ def build_parser():
     parser.add_argument("--profile", "-p", default=None, help="Config profile")
     parser.add_argument("--format", "-f", choices=["json", "table"], default="json", help="Output format")
     parser.add_argument("--dry-run", action="store_true", help="Preview without changes")
+    parser.add_argument("--version", "-V", action="version", version=f"pcxa {__version__}")
 
     sub = parser.add_subparsers(dest="command", help="Commands")
 
@@ -2622,6 +2630,10 @@ def build_parser():
     p.add_argument("--company", type=int, help="Company ID (only used with --local)")
     p.add_argument("--user", help="Pin auth account by email for this repo (only used with --local)")
     p.add_argument("--local", action="store_true", help="Write to .pcxa in CWD instead of global config")
+
+    # ── update ──
+    p = sub.add_parser("update", help="Update pcxa to the latest release from GitHub")
+    p.add_argument("--dry-run", action="store_true", help="Print what would be run without executing")
 
     # ── project ──
     proj_p = sub.add_parser("project", help="View/update project metadata")
@@ -3435,7 +3447,7 @@ def resolve_ids(client):
 # ─── Entrypoint ──────────────────────────────────────────────────────────────
 
 # Commands that don't need a client
-AUTH_FREE = {"login", "setup", "whoami", "set-project"}
+AUTH_FREE = {"login", "setup", "whoami", "set-project", "update"}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FORMS — Form template management
@@ -5051,6 +5063,94 @@ SUB_COMMAND_KEYS = {
 }
 
 
+# ─── Update check & self-update ──────────────────────────────────────────────
+
+
+def _parse_version(s):
+    """Parse '1.2.3' or 'v1.2.3' into a tuple of ints. Returns () on failure."""
+    s = (s or "").strip().lstrip("v")
+    parts = s.split(".")
+    out = []
+    for p in parts:
+        digits = "".join(c for c in p if c.isdigit())
+        if not digits:
+            return tuple(out)
+        out.append(int(digits))
+    return tuple(out)
+
+
+def _detect_install_mode():
+    """Return ('editable', repo_path) | ('site-packages', None) | ('script', None).
+
+    Editable install: pcxa.py lives inside a git checkout (has .git nearby).
+    """
+    here = Path(__file__).resolve().parent
+    if (here / ".git").exists():
+        return ("editable", here)
+    parent_git = here.parent / ".git"
+    if parent_git.exists():
+        return ("editable", here.parent)
+    if "site-packages" in str(here):
+        return ("site-packages", None)
+    return ("script", None)
+
+
+def _check_for_update():
+    """Once per day, check GitHub releases for a newer version. Returns latest tag or None."""
+    if os.environ.get("PCXA_NO_UPDATE_CHECK"):
+        return None
+    now = time.time()
+    try:
+        if UPDATE_CHECK_FILE.exists():
+            data = json.loads(UPDATE_CHECK_FILE.read_text())
+            if now - data.get("ts", 0) < UPDATE_CHECK_INTERVAL_SECONDS:
+                latest = data.get("latest")
+                return latest if latest and _parse_version(latest) > _parse_version(__version__) else None
+    except Exception:
+        pass
+    try:
+        resp = requests.get(GITHUB_RELEASES_URL, timeout=2,
+                            headers={"Accept": "application/vnd.github+json"})
+        if resp.status_code != 200:
+            return None
+        latest = resp.json().get("tag_name", "")
+    except Exception:
+        return None
+    try:
+        UPDATE_CHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        UPDATE_CHECK_FILE.write_text(json.dumps({"ts": now, "latest": latest}))
+    except Exception:
+        pass
+    return latest if latest and _parse_version(latest) > _parse_version(__version__) else None
+
+
+def _print_update_notice(latest):
+    """Yellow-ish, non-blocking, single line on stderr."""
+    if not latest:
+        return
+    msg = f"pcxa: {latest} available (current {__version__}) — run `pcxa update`"
+    if sys.stderr.isatty():
+        msg = f"\033[33m{msg}\033[0m"
+    print(msg, file=sys.stderr)
+
+
+def cmd_update(args):
+    """Self-update from GitHub. Detects editable installs and prints git-pull instead."""
+    mode, repo_path = _detect_install_mode()
+    if mode == "editable":
+        print(f"Editable install detected at: {repo_path}")
+        print(f"To update, run:")
+        print(f"  cd {repo_path} && git pull")
+        return
+    import subprocess
+    target = f"git+{GITHUB_REPO_URL[:-4] if GITHUB_REPO_URL.endswith('.git') else GITHUB_REPO_URL}.git"
+    cmd = [sys.executable, "-m", "pip", "install", "--upgrade", target]
+    print(f"Running: {' '.join(cmd)}")
+    if args.dry_run:
+        return
+    raise SystemExit(subprocess.call(cmd))
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -5060,14 +5160,20 @@ def main():
         sys.exit(0)
 
     if args.command in AUTH_FREE:
-        if args.command == "login":
-            cmd_login(args)
-        elif args.command == "setup":
-            cmd_setup(args)
-        elif args.command == "whoami":
-            cmd_whoami(None, args)
-        elif args.command == "set-project":
-            cmd_set_project(args)
+        try:
+            if args.command == "login":
+                cmd_login(args)
+            elif args.command == "setup":
+                cmd_setup(args)
+            elif args.command == "whoami":
+                cmd_whoami(None, args)
+            elif args.command == "set-project":
+                cmd_set_project(args)
+            elif args.command == "update":
+                cmd_update(args)
+        finally:
+            if args.command != "update":
+                _print_update_notice(_check_for_update())
         return
 
     config = load_config()
@@ -5099,6 +5205,8 @@ def main():
         sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(130)
+    finally:
+        _print_update_notice(_check_for_update())
 
 
 if __name__ == "__main__":
