@@ -114,7 +114,8 @@ pcxa folders tree --depth 2                                   # hierarchy
 pcxa folders create "Contracts" --parent 5                    # new folder
 pcxa folders rename 5 "Legal"                                 # rename
 pcxa folders move 5 --parent 10                               # reparent
-pcxa folders contents 5                                       # subfolders + files
+pcxa folders contents 5                                       # subfolders + files (paginated; --timeout for slow folders)
+pcxa folders subfolders 5                                     # lightweight [{id,name}] list (fast on large folders)
 pcxa folders delete 5                                         # delete + all contents
 pcxa move 10 11 12 --folder 5                                 # bulk move files
 pcxa categorize 10 11 --category "Submittal"                  # bulk set category
