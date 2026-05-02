@@ -1582,9 +1582,54 @@ def cmd_folders_delete(client, args):
         print(f"Deleted folder {args.folder_id} and all contents")
 
 
+def cmd_folders_subfolders(client, args):
+    """Lightweight subfolder listing for path resolution.
+
+    Hits POST /folders/{id}/subfolders/ which returns only [{id, name}] and
+    is paginated. Walks all pages and returns a single JSON array. This is
+    much faster than `folders contents` on large folders because the backend
+    skips the file_count / subfolder_count Cartesian-product COUNT joins.
+    """
+    timeout = getattr(args, "timeout", None) or 180
+    page_size = getattr(args, "page_size", None) or 1000
+    page = 1
+    out = []
+    while True:
+        resp = client._request(
+            "GET",
+            client._url(f"folders/{args.folder_id}/subfolders/"),
+            params={"page": page, "page_size": page_size},
+            timeout=timeout,
+        )
+        data = resp.json()
+        results = data.get("results") if isinstance(data, dict) else data
+        if results is None:
+            results = []
+        for s in results:
+            sid = s.get("id")
+            name = s.get("name")
+            if sid is not None and name is not None:
+                out.append({"id": int(sid), "name": str(name)})
+        # DRF paginators expose `next` as the next URL or null.
+        next_url = data.get("next") if isinstance(data, dict) else None
+        if not next_url:
+            break
+        page += 1
+    out_json({"subfolders": out, "count": len(out)})
+
+
 def cmd_folders_contents(client, args):
     """Show folder contents."""
-    data = client.get(f"folders/{args.folder_id}/contents/")
+    # Large folders (e.g. project-4 ProjectSight Documents/QA-QC, RFI, Submittal)
+    # can take 30-90s server-side. Override the 30s default to give the backend
+    # room to respond for legitimately large enumerations.
+    timeout = getattr(args, "timeout", None) or 180
+    resp = client._request(
+        "GET",
+        client._url(f"folders/{args.folder_id}/contents/"),
+        timeout=timeout,
+    )
+    data = resp.json()
     if args.format == "json":
         out_json(data)
         return
@@ -2789,6 +2834,19 @@ def build_parser():
 
     p = folders_sub.add_parser("contents", help="Show folder contents")
     p.add_argument("folder_id", type=int)
+    p.add_argument("--timeout", type=int, default=180,
+                   help="HTTP read timeout in seconds (default: 180)")
+
+    p = folders_sub.add_parser(
+        "subfolders",
+        help="Lightweight [{id, name}] subfolder listing for path resolution "
+             "(paginated; faster than `contents` on large folders)",
+    )
+    p.add_argument("folder_id", type=int)
+    p.add_argument("--page-size", type=int, default=1000,
+                   help="Results per page (default: 1000, max enforced server-side)")
+    p.add_argument("--timeout", type=int, default=180,
+                   help="HTTP read timeout in seconds (default: 180)")
 
     # ── move / categorize (bulk file ops) ──
     p = sub.add_parser("move", help="Move files to folder")
@@ -4975,6 +5033,7 @@ SUB_HANDLERS = {
     "folders": {
         "tree": cmd_folders_tree, "create": cmd_folders_create, "rename": cmd_folders_rename,
         "move": cmd_folders_move, "delete": cmd_folders_delete, "contents": cmd_folders_contents,
+        "subfolders": cmd_folders_subfolders,
     },
     "activities": {
         "list": cmd_activities_list, "get": cmd_activities_get, "create": cmd_activities_create,
