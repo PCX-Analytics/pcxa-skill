@@ -19,13 +19,13 @@ Drop the skill into your Claude Code skills directory.
 **User-level (available in every project):**
 
 ```bash
-git clone https://github.com/pcurielatmxi/pcxa-skill.git ~/.claude/skills/pcxa
+git clone https://github.com/pcuriel19/pcxa-skill.git ~/.claude/skills/pcxa
 ```
 
 **Project-level (only in this repo):**
 
 ```bash
-git clone https://github.com/pcurielatmxi/pcxa-skill.git .claude/skills/pcxa
+git clone https://github.com/pcuriel19/pcxa-skill.git .claude/skills/pcxa
 ```
 
 Make sure `requests` is available on your Python:
