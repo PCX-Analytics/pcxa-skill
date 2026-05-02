@@ -14,7 +14,7 @@ All commands output JSON by default. Use `-f table` for human-readable. Use `--d
 
 If `pcxa` is not on PATH, ask the user to install it once with:
 ```
-pipx install git+https://github.com/pcuriel19/pcxa-skill.git
+pipx install git+https://github.com/PCX-Analytics/pcxa-skill.git
 ```
 Then `pcxa update` self-updates from GitHub. The CLI prints a one-line notice to stderr (max once per 24h) when a newer release is available.
 

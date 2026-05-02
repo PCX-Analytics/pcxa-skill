@@ -49,7 +49,7 @@ except ImportError:
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 GLOBAL_CONFIG_DIR = Path.home() / ".file_explorer"
 GLOBAL_CONFIG_FILE = GLOBAL_CONFIG_DIR / "config.json"
@@ -57,8 +57,8 @@ LOCAL_CONFIG_NAME = ".pcxa"  # repo-level project override (committed)
 LOCAL_CREDENTIALS_NAME = ".pcxa-credentials.json"  # repo-level credentials (gitignored)
 UPDATE_CHECK_FILE = GLOBAL_CONFIG_DIR / "last_update_check.json"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
-GITHUB_RELEASES_URL = "https://api.github.com/repos/pcuriel19/pcxa-skill/releases/latest"
-GITHUB_REPO_URL = "https://github.com/pcuriel19/pcxa-skill.git"
+GITHUB_RELEASES_URL = "https://api.github.com/repos/PCX-Analytics/pcxa-skill/releases/latest"
+GITHUB_REPO_URL = "https://github.com/PCX-Analytics/pcxa-skill.git"
 
 KNOWN_FILE_TYPES = [
     "PDF", "DOC", "DOCX", "XLS", "XLSX", "PPT", "PPTX", "TXT", "CSV",

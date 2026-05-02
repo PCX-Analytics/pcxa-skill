@@ -22,7 +22,7 @@ Use [pipx](https://pypa.github.io/pipx/) so the CLI lives in its own venv and
 `pcxa` is callable everywhere:
 
 ```bash
-pipx install git+https://github.com/pcuriel19/pcxa-skill.git
+pipx install git+https://github.com/PCX-Analytics/pcxa-skill.git
 pcxa --version
 ```
 
@@ -33,7 +33,7 @@ out. Disable with `PCXA_NO_UPDATE_CHECK=1` in your environment.
 For local development:
 
 ```bash
-git clone https://github.com/pcuriel19/pcxa-skill.git ~/pcxa-skill
+git clone https://github.com/PCX-Analytics/pcxa-skill.git ~/pcxa-skill
 pipx install -e ~/pcxa-skill        # edits to ~/pcxa-skill take effect immediately
 ```
 
@@ -45,7 +45,7 @@ have multiple repos and want one source of truth) is a symlink to a single
 git checkout:
 
 ```bash
-git clone https://github.com/pcuriel19/pcxa-skill.git ~/pcxa-skill
+git clone https://github.com/PCX-Analytics/pcxa-skill.git ~/pcxa-skill
 ln -s ~/pcxa-skill ~/.claude/skills/pcxa
 ```
 
