@@ -56,8 +56,21 @@ Fallback if browser login isn't available:
 python ~/.claude/skills/pcxa/pcxa.py setup -u you@example.com
 ```
 
-Tokens are cached at `~/.file_explorer/config.json` (global) or in a
-`.pcxa-credentials.json` file next to a `.pcxa` project marker (per-repo).
+## Per-repo sessions
+
+Sessions are isolated per repository so different repos can sign in as different
+PCXA accounts without clobbering each other. The CLI picks the credentials file
+in this order:
+
+1. `<dir-with-.pcxa>/.pcxa-credentials.json` — explicit project marker
+2. `<git-root>/.pcxa-credentials.json` — automatic, when inside any git repo
+3. `~/.file_explorer/config.json` — only when run outside any repo
+
+So the moment you `pcxa login` from inside a git repo, that login lives in the
+repo and won't affect any other repo. `pcxa whoami` always prints the resolved
+credentials path so you can see which session is active.
+
+Add `.pcxa-credentials.json` to your repo's `.gitignore` — it contains tokens.
 
 ## Per-repo project pinning
 

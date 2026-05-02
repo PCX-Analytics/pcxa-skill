@@ -31,8 +31,10 @@ Prompts for password securely. Use this if browser login is unavailable.
 
 **Step 2 — Check auth and project (Claude does this):**
 ```bash
-pcxa whoami        # shows "(from .pcxa)" when repo-level config is active
+pcxa whoami        # shows the resolved credentials path on the "Creds:" line
 ```
+
+**Sessions are per-repo by default.** Inside any git repo, credentials are stored at `<git-root>/.pcxa-credentials.json`, so logging into one repo does not affect any other. The global fallback (`~/.file_explorer/config.json`) is only used when running outside a git repo. If `whoami` shows the wrong account, check the `Creds:` path it prints — that's the file in use.
 
 **Project is configured per-repo** via a `.pcxa` file in the repo root — different repos automatically use different projects without affecting each other.
 

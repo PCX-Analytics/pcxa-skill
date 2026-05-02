@@ -79,12 +79,43 @@ def find_local_config_path():
         current = current.parent
 
 
-def get_config_file():
-    """Return the credentials config path: per-repo if .pcxa is found, else global."""
+def find_git_root():
+    """Walk up from CWD looking for a .git directory or file (handles worktrees).
+
+    Returns the Path of the git root, or None if not inside a git repo.
+    """
+    current = Path.cwd()
+    while True:
+        if (current / ".git").exists():
+            return current
+        if current == current.parent:
+            return None
+        current = current.parent
+
+
+def resolve_credentials_path():
+    """Pick where to read/write credentials.
+
+    Priority (first match wins):
+      1. <ancestor with .pcxa>/.pcxa-credentials.json — explicit project marker
+      2. <git-root>/.pcxa-credentials.json            — automatic per-repo isolation
+      3. ~/.file_explorer/config.json                  — global fallback (outside any repo)
+
+    Returns (path, source) where source is "pcxa", "git", or "global".
+    """
     local = find_local_config_path()
     if local is not None:
-        return local.parent / LOCAL_CREDENTIALS_NAME
-    return GLOBAL_CONFIG_FILE
+        return local.parent / LOCAL_CREDENTIALS_NAME, "pcxa"
+    git_root = find_git_root()
+    if git_root is not None:
+        return git_root / LOCAL_CREDENTIALS_NAME, "git"
+    return GLOBAL_CONFIG_FILE, "global"
+
+
+def get_config_file():
+    """Return the credentials config path. Prefer per-repo over global."""
+    path, _ = resolve_credentials_path()
+    return path
 
 
 def load_config():
@@ -555,6 +586,13 @@ def cmd_whoami(client, args):
     company_src = " (from .pcxa)" if local.get("company") else ""
     project_src = " (from .pcxa)" if local.get("project") else ""
 
+    creds_path, creds_src = resolve_credentials_path()
+    src_label = {
+        "pcxa": "per-repo (.pcxa marker)",
+        "git": "per-repo (git root)",
+        "global": "global fallback",
+    }[creds_src]
+
     print(f"Active profile: {name}{profile_src}")
     print(f"  URL:     {p.get('url')}")
     print(f"  Auth:    {p.get('auth')}")
@@ -563,6 +601,7 @@ def cmd_whoami(client, args):
     print(f"  Company: {company}{company_src}")
     print(f"  Project: {project}{project_src}")
     print(f"  Token:   {'cached' if p.get('access_token') else 'none'}")
+    print(f"  Creds:   {creds_path}  [{src_label}]")
 
     # If authenticated but missing company/project, list available ones
     if p.get("access_token") and (not p.get("company") or not p.get("project")):
