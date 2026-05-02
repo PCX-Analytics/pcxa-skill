@@ -36,3 +36,6 @@ pcxa = "pcxa:main"
 
 [tool.setuptools]
 py-modules = ["pcxa"]
+
+[tool.setuptools.data-files]
+"share/pcxa-cli" = ["SKILL.md"]
