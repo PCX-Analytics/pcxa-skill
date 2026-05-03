@@ -120,7 +120,7 @@ The CLI is useful on its own too. All commands print JSON by default; pass
 
 ```bash
 pcxa whoami
-pcxa files search "structural defects" --limit 10
+pcxa files search "structural defects" --include histogram,facets
 pcxa activities list --status in_progress -f table
 pcxa progress add 123 --percent 50 --notes "Reviewed shop drawings"
 ```

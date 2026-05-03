@@ -82,7 +82,10 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 ```bash
 pcxa files list --ext PDF --search "keyword" --limit 50
 pcxa files list --tags "urgent,review" --tags-mode all   # AND: files with ALL tags
-pcxa files search "natural language query" --limit 10        # semantic search
+pcxa files search "natural language query"                    # magnitude + page
+pcxa files search "query" --include histogram,facets,tier2    # full picture
+pcxa files search "query" --scope file --threshold 0.75       # narrower
+pcxa files search "query" --page 2 --page-size 50             # next page
 pcxa files content "exact phrase" --ext PDF                   # keyword in file text
 pcxa files read FILE_ID --outline                             # section map
 pcxa files read FILE_ID                                       # first 5 chunks
@@ -105,6 +108,8 @@ pcxa files list --tags to_delete                         # list everything pendi
 **Deletion convention:** `pcxa files delete <ids>` marks files for deletion by applying the `to_delete` tag. Use `pcxa files restore <ids>` to undo before cleanup runs. Without `--yes`, `delete` prompts for confirmation.
 
 Search results include `url` fields — always show these to users for document links.
+
+**Search response shape:** `pcxa files search` returns dataset *magnitude* (unique files / activities / chunks / folders, plus a per-file-type breakdown), an opt-in *histogram* of similarity buckets, opt-in *facets* (top folders, file types, WBS branches), an opt-in *tier-2 preview* showing what dropping the threshold would yield, plus a paginated *page* of concrete results above the threshold. Read magnitude first to decide your strategy: <10 results → read them all; tens → cluster by folder; hundreds → narrow with `--ext`, a higher `--threshold`, or a folder facet before reading. `--ext` narrows the *page only* — magnitude/histogram/facets always reflect the full corpus at the active threshold so the haystack size stays stable as you experiment.
 
 ## Tags & Folders
 

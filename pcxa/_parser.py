@@ -92,12 +92,34 @@ def build_parser():
     p.add_argument("--limit", type=int, default=25)
     p.add_argument("--offset", type=int, default=0)
 
-    p = files_sub.add_parser("search", help="Semantic vector search")
+    p = files_sub.add_parser(
+        "search",
+        help="Semantic search with magnitude, histogram, facets (LLM-friendly)",
+    )
     p.add_argument("query", help="Natural language query")
-    p.add_argument("--types", help="Source types: file,drawing,photo")
-    p.add_argument("--ext", help="File type filter")
-    p.add_argument("--limit", type=int, default=10)
-    p.add_argument("--show-content", action="store_true")
+    p.add_argument(
+        "--scope",
+        help="Sources to search: csv subset of file,activity,drawing,photo (default: all)",
+    )
+    p.add_argument(
+        "--threshold", type=float, default=0.65,
+        help="Cosine similarity floor for text sources (default 0.65)",
+    )
+    p.add_argument(
+        "--image-threshold", dest="image_threshold", type=float, default=0.40,
+        help="Cosine similarity floor for drawings/photos (default 0.40, lower because cross-modal)",
+    )
+    p.add_argument(
+        "--tier2-threshold", dest="tier2_threshold", type=float, default=None,
+        help="Lower threshold for the 'what would I gain' preview (default: threshold - 0.10)",
+    )
+    p.add_argument("--ext", help="File type filter — narrows page only, not magnitude")
+    p.add_argument(
+        "--include",
+        help="csv of optional sections to compute: histogram,facets,tier2",
+    )
+    p.add_argument("--page", type=int, default=1)
+    p.add_argument("--page-size", dest="page_size", type=int, default=25)
 
     p = files_sub.add_parser("content", help="Keyword search in file text")
     p.add_argument("query", help="Keyword/phrase")
