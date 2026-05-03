@@ -45,7 +45,7 @@ def build_parser():
 
     # ── set-project ──
     p = sub.add_parser("set-project", help="Set default project (globally or per-repo)")
-    p.add_argument("project_id", type=int, help="Project ID")
+    p.add_argument("project_id", type=int, nargs="?", help="Project ID (omit to choose from menu if multiple exist)")
     p.add_argument("--company", type=int, help="Company ID (only used with --local)")
     p.add_argument("--user", help="Pin auth account by email for this repo (only used with --local)")
     p.add_argument("--local", action="store_true", help="Write to .pcxa in CWD instead of global config")

@@ -14,7 +14,113 @@ from pcxa._config import (
     save_config,
 )
 from pcxa._http import requests
+from pcxa._api import APIClient
 from urllib.parse import parse_qs, urlparse
+
+
+def _setup_repo_config(api_url, access_token, username, local_path):
+    """Auto-detect and set company/project in .pcxa file with menu if multiple options."""
+    try:
+        local_cfg = json.loads(local_path.read_text()) if local_path.exists() else {}
+        if not isinstance(local_cfg, dict):
+            local_cfg = {}
+    except Exception:
+        local_cfg = {}
+
+    session = requests.Session()
+    session.headers["Authorization"] = f"Bearer {access_token}"
+    base = api_url.rstrip("/")
+
+    # Fetch companies
+    try:
+        resp = session.get(f"{base}/api/companies/", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        companies = data.get("results", data) if isinstance(data, dict) else data
+    except Exception:
+        print(f"  Could not fetch companies for .pcxa setup", file=sys.stderr)
+        return
+
+    if not companies:
+        print(f"  No companies found", file=sys.stderr)
+        return
+
+    # Select company
+    company_id = None
+    if len(companies) == 1:
+        company_id = companies[0]["id"]
+        print(f"  Company auto-detected: {companies[0].get('name', '?')} (id={company_id})")
+    else:
+        print(f"\n  Multiple companies found. Select one:")
+        for i, c in enumerate(companies, 1):
+            print(f"    {i}. {c.get('name', '?')} (id={c['id']})")
+        while True:
+            try:
+                choice = input(f"  Enter choice (1-{len(companies)}): ").strip()
+                idx = int(choice) - 1
+                if 0 <= idx < len(companies):
+                    company_id = companies[idx]["id"]
+                    print(f"  Selected: {companies[idx].get('name', '?')} (id={company_id})")
+                    break
+            except (ValueError, IndexError):
+                pass
+            print(f"  Invalid choice. Try again.")
+
+    if not company_id:
+        return
+
+    # Fetch projects in company
+    try:
+        resp = session.get(f"{base}/api/companies/{company_id}/projects/", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        projects = data.get("results", data) if isinstance(data, dict) else data
+    except Exception:
+        print(f"  Could not fetch projects for .pcxa setup", file=sys.stderr)
+        return
+
+    if not projects:
+        print(f"  No projects found in this company", file=sys.stderr)
+        return
+
+    # Select project
+    project_id = None
+    if len(projects) == 1:
+        project_id = projects[0]["id"]
+        print(f"  Project auto-detected: {projects[0].get('name', '?')} (id={project_id})")
+    else:
+        print(f"\n  Multiple projects found. Select one:")
+        for i, p in enumerate(projects, 1):
+            print(f"    {i}. {p.get('name', '?')} (id={p['id']})")
+        while True:
+            try:
+                choice = input(f"  Enter choice (1-{len(projects)}): ").strip()
+                idx = int(choice) - 1
+                if 0 <= idx < len(projects):
+                    project_id = projects[idx]["id"]
+                    print(f"  Selected: {projects[idx].get('name', '?')} (id={project_id})")
+                    break
+            except (ValueError, IndexError):
+                pass
+            print(f"  Invalid choice. Try again.")
+
+    if not project_id:
+        return
+
+    # Write to .pcxa with company, project, and user
+    local_cfg["company"] = company_id
+    local_cfg["project"] = project_id
+    if username:
+        local_cfg["user"] = username
+
+    try:
+        local_path.write_text(json.dumps(local_cfg, indent=2))
+        print(f"\n  Repo config saved to {local_path}")
+        print(f"    Company: {company_id}")
+        print(f"    Project: {project_id}")
+        print(f"    User:    {username}")
+    except Exception as e:
+        print(f"  Could not write repo config: {e}", file=sys.stderr)
 
 
 def cmd_login(args):
@@ -135,21 +241,10 @@ def cmd_login(args):
         print(f"  Company ID: {profile['company']}")
     print(f"  Config: {get_config_file()}")
 
-    # If this repo has a .pcxa pin file without a `user` field, bind it to this
-    # account so subsequent runs in this repo resolve to the same profile even
-    # if the global default profile changes (e.g. a colleague logs in later).
+    # If in a repo, auto-detect and set company/project, then pin account+company+project to .pcxa.
     local_path = find_local_config_path()
-    if local_path is not None and result.get("username"):
-        try:
-            local_cfg = json.loads(local_path.read_text())
-            if not isinstance(local_cfg, dict):
-                local_cfg = {}
-        except Exception:
-            local_cfg = {}
-        if not local_cfg.get("user"):
-            local_cfg["user"] = result["username"]
-            local_path.write_text(json.dumps(local_cfg, indent=2))
-            print(f"  Pinned account in {local_path}: {result['username']}")
+    if local_path is not None:
+        _setup_repo_config(api_url, result.get("access"), result.get("username"), local_path)
 
 
 def cmd_setup(args):
@@ -281,7 +376,81 @@ def cmd_whoami(client, args):
 
 
 def cmd_set_project(args):
-    """Set the default project — globally in user config, or locally in .pcxa."""
+    """Set the default project — globally in user config, or locally in .pcxa.
+
+    If project_id not provided and multiple projects exist, show interactive menu.
+    """
+    project_id = getattr(args, "project_id", None)
+    company_id = getattr(args, "company", None)
+
+    # If no project_id provided, try to detect it interactively
+    if not project_id:
+        config = load_config()
+        name = getattr(args, "profile", None) or config.get("default_profile", "local")
+        profiles = config.get("profiles", {})
+
+        if name not in profiles:
+            print(f"Profile '{name}' not found. Run: pcxa setup -u YOUR_EMAIL", file=sys.stderr)
+            sys.exit(1)
+
+        profile = profiles[name]
+        if not profile.get("access_token"):
+            print(f"Profile '{name}' not authenticated. Run: pcxa login", file=sys.stderr)
+            sys.exit(1)
+
+        # Determine company for project fetch
+        if not company_id:
+            company_id = getattr(args, "company", None)
+            if not company_id and getattr(args, "local", False):
+                try:
+                    local_cfg = json.loads((Path.cwd() / LOCAL_CONFIG_NAME).read_text())
+                    company_id = local_cfg.get("company")
+                except Exception:
+                    pass
+            if not company_id:
+                company_id = profile.get("company")
+
+        if not company_id:
+            print("Company not set. Use: pcxa set-project PROJECT_ID --company COMPANY_ID", file=sys.stderr)
+            sys.exit(1)
+
+        # Fetch projects
+        session = requests.Session()
+        session.headers["Authorization"] = f"Bearer {profile['access_token']}"
+        base = profile["url"].rstrip("/")
+
+        try:
+            resp = session.get(f"{base}/api/companies/{company_id}/projects/", timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            projects = data.get("results", data) if isinstance(data, dict) else data
+        except Exception as e:
+            print(f"Could not fetch projects: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if not projects:
+            print("No projects found in this company", file=sys.stderr)
+            sys.exit(1)
+
+        if len(projects) == 1:
+            project_id = projects[0]["id"]
+            print(f"Project auto-selected: {projects[0].get('name', '?')} (id={project_id})")
+        else:
+            print(f"Select project:")
+            for i, p in enumerate(projects, 1):
+                print(f"  {i}. {p.get('name', '?')} (id={p['id']})")
+            while True:
+                try:
+                    choice = input(f"Enter choice (1-{len(projects)}): ").strip()
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(projects):
+                        project_id = projects[idx]["id"]
+                        print(f"Selected: {projects[idx].get('name', '?')} (id={project_id})")
+                        break
+                except (ValueError, IndexError):
+                    pass
+                print(f"Invalid choice. Try again.")
+
     if getattr(args, "local", False):
         local_file = Path.cwd() / LOCAL_CONFIG_NAME
         local_cfg = {}
@@ -290,24 +459,26 @@ def cmd_set_project(args):
                 local_cfg = json.loads(local_file.read_text())
             except Exception:
                 pass
-        local_cfg["project"] = args.project_id
-        if getattr(args, "company", None):
-            local_cfg["company"] = args.company
+        local_cfg["project"] = project_id
+        if company_id:
+            local_cfg["company"] = company_id
         if getattr(args, "user", None):
             local_cfg["user"] = args.user
         local_file.write_text(json.dumps(local_cfg, indent=2))
         print(f"Repo-level config written to {local_file}")
-        print(f"  Project: {args.project_id}")
+        print(f"  Project: {project_id}")
         if local_cfg.get("company"):
             print(f"  Company: {local_cfg['company']}")
         if local_cfg.get("user"):
             print(f"  User:    {local_cfg['user']}")
     else:
         config = load_config()
-        name = args.profile or config.get("default_profile", "local")
+        name = getattr(args, "profile", None) or config.get("default_profile", "local")
         if name not in config.get("profiles", {}):
             print(f"Profile '{name}' not found. Run: pcxa setup -u YOUR_EMAIL", file=sys.stderr)
             sys.exit(1)
-        config["profiles"][name]["project"] = args.project_id
+        config["profiles"][name]["project"] = project_id
+        if company_id:
+            config["profiles"][name]["company"] = company_id
         save_config(config)
-        print(f"Default project set to {args.project_id} (global)")
+        print(f"Default project set to {project_id} (global)")
