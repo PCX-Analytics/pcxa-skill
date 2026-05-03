@@ -12,7 +12,7 @@ The repo is structured for both Claude Code plugin installation and direct CLI i
 - `bin/pcxa` — plugin executable wrapper.
 - `pcxa.py` — Python CLI that talks to `api.pcxa.app`.
 
-The CLI depends only on the `requests` library.
+The CLI uses only the Python standard library.
 
 ## Install
 

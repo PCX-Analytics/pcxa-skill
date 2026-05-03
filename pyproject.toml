@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcxa-cli"
-version = "0.2.2"
+version = "0.2.3"
 description = "Command-line client and Claude Code skill for the PCXA construction-intelligence platform"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -22,9 +22,7 @@ classifiers = [
     "Topic :: Office/Business",
     "Topic :: Utilities",
 ]
-dependencies = [
-    "requests>=2.28",
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/PCX-Analytics/pcxa-skill"

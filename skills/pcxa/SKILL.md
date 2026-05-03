@@ -18,7 +18,6 @@ pipx install git+https://github.com/PCX-Analytics/pcxa-skill.git
 ```
 Then `pcxa update` self-upgrades from GitHub. The CLI prints a one-line notice to stderr (max once per 24h) when a newer release is available.
 
-If `pcxa` reports that Python package `requests` is missing, ask the user to run the `pipx install` command above.
 
 ## Setup & Authentication
 
