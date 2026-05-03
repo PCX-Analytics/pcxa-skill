@@ -82,6 +82,14 @@ def cmd_files_search(client, args):
         params["tier2_threshold"] = args.tier2_threshold
     if args.ext:
         params["file_types"] = args.ext
+    if getattr(args, "folder_id", None) is not None:
+        params["folder_id"] = args.folder_id
+    if getattr(args, "wbs_prefix", None):
+        params["wbs_prefix"] = args.wbs_prefix
+    if getattr(args, "date_from", None):
+        params["date_from"] = args.date_from
+    if getattr(args, "date_to", None):
+        params["date_to"] = args.date_to
     if args.include:
         params["include"] = args.include
 

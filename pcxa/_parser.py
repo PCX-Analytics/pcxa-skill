@@ -115,6 +115,22 @@ def build_parser():
     )
     p.add_argument("--ext", help="File type filter — narrows page only, not magnitude")
     p.add_argument(
+        "--folder", dest="folder_id", type=int,
+        help="Scope file results to this folder + descendants (recursive)",
+    )
+    p.add_argument(
+        "--wbs-prefix", dest="wbs_prefix",
+        help="Scope activity results to a WBS prefix (e.g. 1.4 matches 1.4, 1.4.2, 1.4.2.1)",
+    )
+    p.add_argument(
+        "--date-from", dest="date_from",
+        help="Lower date bound (YYYY-MM-DD). Files: extracted_document_date; activities: planned_start",
+    )
+    p.add_argument(
+        "--date-to", dest="date_to",
+        help="Upper date bound (YYYY-MM-DD). Same fields as --date-from",
+    )
+    p.add_argument(
         "--include",
         help="csv of optional sections to compute: histogram,facets,tier2",
     )
