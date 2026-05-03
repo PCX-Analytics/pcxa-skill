@@ -67,21 +67,33 @@ Fallback if browser login isn't available:
 pcxa setup -u you@example.com
 ```
 
-## Per-repo sessions
+## Per-repo sessions (without per-repo secrets)
 
-Sessions are isolated per repository so different repos can sign in as different
-PCXA accounts without clobbering each other. The CLI picks the credentials file
-in this order:
+All credentials live in **one global file** at `~/.pcxa/credentials.json` —
+never inside any repo. Each named profile holds the tokens for one PCXA account.
 
-1. `<dir-with-.pcxa>/.pcxa-credentials.json` — explicit project marker
-2. `<git-root>/.pcxa-credentials.json` — automatic, when inside any git repo
-3. `~/.file_explorer/config.json` — only when run outside any repo
+To make a repo always use a specific account, drop a `.pcxa` file at the repo
+root with a `user` field:
 
-So the moment you `pcxa login` from inside a git repo, that login lives in the
-repo and won't affect any other repo. `pcxa whoami` always prints the resolved
-credentials path so you can see which session is active.
+```json
+{ "company": 4, "project": 10, "user": "alice@example.com" }
+```
 
-Add `.pcxa-credentials.json` to your repo's `.gitignore` — it contains tokens.
+`.pcxa` is committed (no secrets in it). The CLI matches `user` against profile
+usernames in `~/.pcxa/credentials.json` to pick the right account for that repo.
+This means different repos can transparently use different accounts without ever
+writing tokens into a repo and without per-repo `.gitignore` entries.
+
+`pcxa login` automatically pins the new account into the repo's `.pcxa` file
+(if one exists and doesn't already pin a user), so you usually don't have to
+edit it by hand.
+
+`pcxa whoami` always prints the credentials path and the active repo pin so you
+can see which session is in use.
+
+Pre-0.3 installs that have credentials at `~/.file_explorer/config.json` or
+`<repo>/.pcxa-credentials.json` are migrated to the new location automatically
+on first run; the legacy files are left in place and can be deleted afterwards.
 
 ## Per-repo project pinning
 

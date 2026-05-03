@@ -41,19 +41,21 @@ Prompts for password securely. Use this if browser login is unavailable.
 pcxa whoami        # shows the resolved credentials path on the "Creds:" line
 ```
 
-**Sessions are per-repo by default.** Inside any git repo, credentials are stored at `<git-root>/.pcxa-credentials.json`, so logging into one repo does not affect any other. The global fallback (`~/.file_explorer/config.json`) is only used when running outside a git repo. If `whoami` shows the wrong account, check the `Creds:` path it prints — that's the file in use.
+**Credentials are global, accounts are pinned per-repo.** All accounts live in `~/.pcxa/credentials.json` (one file, multiple named profiles — never inside any repo). Each repo can pin which account to use via a committed `.pcxa` file with a `user` field. This means different repos can use different PCXA accounts with zero risk of leaking tokens through git. `pcxa login` auto-pins the user field on the active repo's `.pcxa` if it's not already set.
 
-**Project is configured per-repo** via a `.pcxa` file in the repo root — different repos automatically use different projects without affecting each other.
+**Project + account are configured per-repo** via the `.pcxa` file in the repo root. The CLI matches the `user` field against profile usernames to pick which credentials to use.
 
 ```bash
-# Set project for the current repo (writes .pcxa in CWD)
-pcxa set-project 10 --company 4 --local
+# Set project + account for the current repo (writes .pcxa in CWD)
+pcxa set-project 10 --company 4 --user alice@example.com --local
 
-# Set global fallback (used when no .pcxa present)
+# Set global default project (when no .pcxa present)
 pcxa set-project 4
 ```
 
-`.pcxa` file format: `{ "company": 4, "project": 10 }`
+`.pcxa` file format: `{ "company": 4, "project": 10, "user": "alice@example.com" }` — committed, contains no secrets.
+
+Pre-0.3 credential locations (`~/.file_explorer/config.json`, `<repo>/.pcxa-credentials.json`) are auto-migrated on first run.
 
 If `whoami` shows "Project: not set" and no `.pcxa` exists, ask the user which project to use, then run `pcxa set-project ID --local`.
 
