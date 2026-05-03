@@ -152,6 +152,21 @@ def build_parser():
     p.add_argument("--outline", action="store_true", help="Section map only")
     p.add_argument("--all", action="store_true")
 
+    p = files_sub.add_parser(
+        "batch-read",
+        help="Read multiple files in one round trip (designed for post-search drill-down)",
+    )
+    p.add_argument(
+        "file_ids", nargs="*", type=int,
+        help="File IDs to read from chunk 0 with default window",
+    )
+    p.add_argument(
+        "--chunk", dest="chunks", action="append",
+        help="Read chunks centered on a specific position. Format: file_id:chunk_index. Repeatable.",
+    )
+    p.add_argument("--window", type=int, default=3, help="Per-file window size (default 3)")
+    p.add_argument("--outline", action="store_true", help="Outline (section map) instead of content")
+
     p = files_sub.add_parser("info", help="File metadata & versions")
     p.add_argument("file_id", type=int)
 

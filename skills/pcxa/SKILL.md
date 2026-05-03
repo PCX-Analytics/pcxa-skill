@@ -93,6 +93,9 @@ pcxa files content "exact phrase" --ext PDF                   # keyword in file 
 pcxa files read FILE_ID --outline                             # section map
 pcxa files read FILE_ID                                       # first 5 chunks
 pcxa files read FILE_ID --start 5                             # next window
+pcxa files batch-read 423 511 612 --window 3                  # multi-file in one call
+pcxa files batch-read --chunk 423:7 --chunk 511:12            # excerpts at specific chunks
+pcxa files batch-read 423 511 --outline                       # outlines, multi-file
 pcxa files info FILE_ID                                       # metadata + versions
 pcxa files stats                                              # project-wide counts
 pcxa files aggregate file_type                                # group by dimension
@@ -113,6 +116,8 @@ pcxa files list --tags to_delete                         # list everything pendi
 Search results include `url` fields — always show these to users for document links.
 
 **Search response shape:** `pcxa files search` returns dataset *magnitude* (unique files / activities / chunks / folders, plus a per-file-type breakdown), an opt-in *histogram* of similarity buckets, opt-in *facets* (top folders, file types, WBS branches), an opt-in *tier-2 preview* showing what dropping the threshold would yield, plus a paginated *page* of concrete results above the threshold. Read magnitude first to decide your strategy: <10 results → read them all; tens → cluster by folder; hundreds → narrow before reading.
+
+**After search → read in batch.** Once `files search` returns the page rows, prefer `files batch-read --chunk file_id:chunk_index` over N single `files read` calls. Each page row carries a `chunk_position` — pass `file_id:chunk_position` as `--chunk` to read just the relevant excerpt + neighbors. One round trip instead of N. Use `--outline` for section maps when files are large and you need to plan further reads.
 
 **Drill-down filters** (re-run search with these to scope down):
 - `--folder <id>` scopes file results to a folder + all descendants (use after seeing facets surface a hot folder).

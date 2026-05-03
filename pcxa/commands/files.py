@@ -244,6 +244,115 @@ def _print_agent_search(data, *, query):
     out_table(rows, ["score", "kind", "id", "name", "where", "url"])
 
 
+def cmd_files_batch_read(client, args):
+    """Read multiple files in a single round trip.
+
+    Designed as the natural follow-up to ``files search``: take the file_ids
+    and chunk positions from the search page and pull just the relevant
+    excerpts in one call instead of N.
+
+    Usage forms:
+      pcxa files batch-read 423 511 612                    # read top of each
+      pcxa files batch-read --chunk 423:7 --chunk 511:12   # targeted excerpts
+      pcxa files batch-read 423 511 --outline              # section maps only
+    """
+    specs = []
+
+    # Plain positional file IDs → read from start with default window.
+    for fid in (args.file_ids or []):
+        spec = {"file_id": int(fid)}
+        if args.outline:
+            spec["outline"] = True
+        else:
+            spec["window"] = args.window
+        specs.append(spec)
+
+    # --chunk file_id:chunk_index pairs → read centered on that chunk.
+    for entry in (args.chunks or []):
+        if ":" not in entry:
+            print(f"--chunk expects file_id:chunk_index (got {entry!r})")
+            return
+        fid_str, idx_str = entry.split(":", 1)
+        try:
+            spec = {
+                "file_id": int(fid_str),
+                "around_chunk": int(idx_str),
+                "window": args.window,
+            }
+        except ValueError:
+            print(f"--chunk values must be integers (got {entry!r})")
+            return
+        if args.outline:
+            spec["outline"] = True
+        specs.append(spec)
+
+    if not specs:
+        print("No files specified. Provide file_ids or --chunk file_id:chunk_index.")
+        return
+
+    body = {"files": specs, "default_window": args.window}
+    data = client.post("semantic-search/batch-read/", json_data=body)
+
+    # Annotate each file with a click-through URL.
+    for f in data.get("files", []):
+        if f.get("ok") and f.get("file_id"):
+            f["url"] = client.file_url(f["file_id"])
+
+    if args.format == "json":
+        out_json(data)
+        return
+
+    stats = data.get("stats") or {}
+    print(
+        f"Batch read: requested={stats.get('requested', 0)} "
+        f"succeeded={stats.get('succeeded', 0)} "
+        f"denied={stats.get('denied', 0)} "
+        f"not_indexed={stats.get('not_indexed', 0)} "
+        f"spec_errors={stats.get('spec_errors', 0)}"
+    )
+
+    for f in data.get("files", []):
+        print()  # blank separator
+        if not f.get("ok"):
+            print(f"  ✗ file {f.get('file_id', '?')}: {f.get('error', 'unknown')}")
+            continue
+
+        title = f.get("file_title", "")
+        ftype = f.get("file_type", "")
+        url = f.get("url", "")
+        print(f"  ✓ file {f['file_id']}: {title}  ({ftype})  {url}")
+
+        summary = f.get("document_summary")
+        if summary:
+            print(f"    Summary: {summary[:200]}")
+
+        # Outline mode
+        sections = f.get("sections")
+        if sections is not None:
+            print(f"    Sections ({len(sections)}, total {f.get('total_chunks', 0)} chunks):")
+            for s in sections:
+                path = " > ".join(s.get("path", [])) or s.get("title", "?")
+                chunks = s.get("chunks", [])
+                rng = f"chunks {chunks[0]}-{chunks[-1]}" if chunks else ""
+                print(f"      {path}  ({rng}, {s.get('chars', 0):,} chars)")
+            continue
+
+        # Window mode
+        w = f.get("window") or {}
+        print(
+            f"    Chunks {w.get('start')}-{w.get('end')} of {f.get('total_chunks', 0)} "
+            f"({len(f.get('chunks_meta') or [])} chunks)"
+        )
+        content = f.get("content", "") or ""
+        # Truncate aggressively in text mode — agent should pass --format=json
+        # when it actually wants the bytes.
+        preview = content[:600] + ("..." if len(content) > 600 else "")
+        if preview.strip():
+            print()
+            for line in preview.splitlines():
+                print(f"      {line}")
+
+
 def cmd_files_content(client, args):
     """Keyword search in indexed file text."""
     try:
