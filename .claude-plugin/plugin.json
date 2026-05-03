@@ -1,0 +1,20 @@
+{
+  "name": "pcxa",
+  "description": "PCXA construction intelligence tools for Claude Code: project files, activities, forms, resources, timesheets, links, and AI chat.",
+  "version": "0.2.2",
+  "author": {
+    "name": "PCX Analytics"
+  },
+  "homepage": "https://www.pcxa.app",
+  "repository": "https://github.com/PCX-Analytics/pcxa-skill",
+  "license": "MIT",
+  "keywords": [
+    "pcxa",
+    "construction",
+    "project-management",
+    "documents",
+    "activities",
+    "forms",
+    "timesheets"
+  ]
+}

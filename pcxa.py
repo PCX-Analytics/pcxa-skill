@@ -49,7 +49,7 @@ except ImportError:
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 GLOBAL_CONFIG_DIR = Path.home() / ".file_explorer"
 GLOBAL_CONFIG_FILE = GLOBAL_CONFIG_DIR / "config.json"

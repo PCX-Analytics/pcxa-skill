@@ -1,22 +1,34 @@
-# pcxa — Claude Code skill for the PCXA platform
+# pcxa — Claude Code plugin for the PCXA platform
 
-A Claude Code skill that lets Claude drive the [PCXA](https://www.pcxa.app)
+A Claude Code plugin and skill that lets Claude drive the [PCXA](https://www.pcxa.app)
 construction-intelligence platform: search and read project files, manage
 activities and progress, fill out forms, work with resources and timesheets,
 link entities, and chat with the project's AI assistant.
 
-The skill is two files:
+The repo is structured for both Claude Code plugin installation and direct CLI installation:
 
-- `SKILL.md` — manifest Claude Code reads to learn the commands.
-- `pcxa.py` — a self-contained Python CLI that talks to `api.pcxa.app`.
+- `.claude-plugin/plugin.json` — plugin metadata for Claude Code.
+- `skills/pcxa/SKILL.md` — skill instructions Claude Code reads.
+- `bin/pcxa` — plugin executable wrapper.
+- `pcxa.py` — Python CLI that talks to `api.pcxa.app`.
 
-It depends only on the `requests` library.
+The CLI depends only on the `requests` library.
 
 ## Install
 
-There are two install vectors — pick one or do both.
+### 1. Claude Code plugin
 
-### 1. CLI on PATH (recommended)
+From a local checkout, validate and load the plugin with Claude Code:
+
+```bash
+git clone https://github.com/PCX-Analytics/pcxa-skill.git ~/pcxa-skill
+claude plugin validate ~/pcxa-skill
+claude --plugin-dir ~/pcxa-skill
+```
+
+Once the plugin is listed in a marketplace, install it from Claude Code with the marketplace name provided by the listing.
+
+### 2. CLI on PATH
 
 Use [pipx](https://pypa.github.io/pipx/) so the CLI lives in its own venv and
 `pcxa` is callable everywhere:
@@ -36,26 +48,6 @@ For local development:
 git clone https://github.com/PCX-Analytics/pcxa-skill.git ~/pcxa-skill
 pipx install -e ~/pcxa-skill        # edits to ~/pcxa-skill take effect immediately
 ```
-
-### 2. Claude Code skill
-
-For Claude Code to discover the skill, `SKILL.md` must live at
-`~/.claude/skills/pcxa/SKILL.md`. One convenient setup is a symlink to a
-single git checkout:
-
-```bash
-git clone https://github.com/PCX-Analytics/pcxa-skill.git ~/pcxa-skill
-ln -s ~/pcxa-skill ~/.claude/skills/pcxa
-```
-
-A `git pull` in `~/pcxa-skill` updates the skill everywhere it's symlinked.
-
-If you want the skill scoped to a single project instead, symlink (or clone)
-into that project's `.claude/skills/pcxa/`.
-
-That's it — Claude Code picks up the skill automatically. Inside Claude, type
-`/pcxa` to invoke it, or just ask Claude to do something on your PCXA project
-and it will reach for the skill.
 
 ## First-run auth
 

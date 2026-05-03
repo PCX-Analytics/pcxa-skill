@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcxa-cli"
-version = "0.2.1"
+version = "0.2.2"
 description = "Command-line client and Claude Code skill for the PCXA construction-intelligence platform"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -38,4 +38,4 @@ pcxa = "pcxa:main"
 py-modules = ["pcxa"]
 
 [tool.setuptools.data-files]
-"share/pcxa-cli" = ["SKILL.md"]
+"share/pcxa-cli" = ["skills/pcxa/SKILL.md"]
