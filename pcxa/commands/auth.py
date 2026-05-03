@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pcxa._config import (
     LOCAL_CONFIG_NAME,
+    find_git_root,
     find_local_config,
     find_local_config_path,
     get_config_file,
@@ -241,8 +242,13 @@ def cmd_login(args):
         print(f"  Company ID: {profile['company']}")
     print(f"  Config: {get_config_file()}")
 
-    # If in a repo, auto-detect and set company/project, then pin account+company+project to .pcxa.
+    # If in a git repo, auto-detect and set company/project, then write .pcxa.
+    # Use existing .pcxa if found, otherwise create one at the git root.
     local_path = find_local_config_path()
+    if local_path is None:
+        git_root = find_git_root()
+        if git_root is not None:
+            local_path = git_root / LOCAL_CONFIG_NAME
     if local_path is not None:
         _setup_repo_config(api_url, result.get("access"), result.get("username"), local_path)
 

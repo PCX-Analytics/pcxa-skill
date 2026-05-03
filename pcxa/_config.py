@@ -43,7 +43,7 @@ def find_local_config_path():
     home = Path.home()
     while True:
         candidate = current / LOCAL_CONFIG_NAME
-        if candidate.exists():
+        if candidate.is_file():
             return candidate
         if current == home or current == current.parent:
             return None
