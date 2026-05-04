@@ -16,17 +16,29 @@ The CLI uses only the Python standard library.
 
 ## Install
 
-### 1. Claude Code plugin
+### 1. Claude Code plugin (recommended for teammates)
 
-From a local checkout, validate and load the plugin with Claude Code:
+Inside Claude Code, add this repo as a marketplace and install the plugin:
+
+```
+/plugin marketplace add PCX-Analytics/pcxa-skill
+/plugin install pcxa@pcxa-skill
+```
+
+That's it — Claude Code clones the repo, registers the skill, and exposes the
+`/pcxa` command. To pick up new releases later:
+
+```
+/plugin marketplace update pcxa-skill
+```
+
+For local development against an unmerged checkout:
 
 ```bash
 git clone https://github.com/PCX-Analytics/pcxa-skill.git ~/pcxa-skill
 claude plugin validate ~/pcxa-skill
 claude --plugin-dir ~/pcxa-skill
 ```
-
-Once the plugin is listed in a marketplace, install it from Claude Code with the marketplace name provided by the listing.
 
 ### 2. CLI on PATH
 

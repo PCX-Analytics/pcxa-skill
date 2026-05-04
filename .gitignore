@@ -1,6 +1,9 @@
 # Auth tokens — never commit
 .pcxa-credentials.json
 
+# Per-repo pin file (each clone has its own; not part of the source repo)
+.pcxa
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,0 +1,35 @@
+{
+  "name": "pcxa-skill",
+  "owner": {
+    "name": "PCX Analytics",
+    "url": "https://www.pcxa.app"
+  },
+  "metadata": {
+    "description": "PCXA construction-intelligence platform tools for Claude Code.",
+    "version": "0.3.0"
+  },
+  "plugins": [
+    {
+      "name": "pcxa",
+      "source": "./",
+      "description": "Drive the PCXA platform from Claude Code: search and read project files, manage activities, fill out forms, work with resources and timesheets, link entities, and chat with the project's AI assistant.",
+      "version": "0.3.0",
+      "author": {
+        "name": "PCX Analytics"
+      },
+      "homepage": "https://www.pcxa.app",
+      "repository": "https://github.com/PCX-Analytics/pcxa-skill",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "pcxa",
+        "construction",
+        "project-management",
+        "documents",
+        "activities",
+        "forms",
+        "timesheets"
+      ]
+    }
+  ]
+}
