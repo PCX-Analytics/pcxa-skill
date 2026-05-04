@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "PCXA construction-intelligence platform tools for Claude Code.",
-    "version": "0.3.2"
+    "version": "0.3.3"
   },
   "plugins": [
     {
       "name": "pcxa",
       "source": "./",
       "description": "Drive the PCXA platform from Claude Code: search and read project files, manage activities, fill out forms, work with resources and timesheets, link entities, and chat with the project's AI assistant.",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "author": {
         "name": "PCX Analytics"
       },

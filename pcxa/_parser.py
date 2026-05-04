@@ -904,7 +904,36 @@ def build_parser():
 
     chat_sub.add_parser("models", help="List available AI models")
 
+    _propagate_format_to_subparsers(parser)
     return parser
+
+
+def _propagate_format_to_subparsers(parser):
+    """Add -f/--format to every subparser so it works after the subcommand too.
+
+    Argparse only parses --format on the parser scope it was registered on. The
+    top-level `pcxa --format table activities list` works, but the more natural
+    `pcxa activities list -f table` raises "unrecognized arguments". Rather than
+    repeat add_argument on 100+ subparsers, walk the tree and inject once.
+
+    default=SUPPRESS so an unset value on the subparser doesn't overwrite the
+    top-level --format that was parsed first.
+    """
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub in action.choices.values():
+                already = any(
+                    a.dest == "format" and a.option_strings
+                    for a in sub._actions
+                )
+                if not already:
+                    sub.add_argument(
+                        "-f", "--format",
+                        choices=["json", "table"],
+                        default=argparse.SUPPRESS,
+                        help="Output format (json|table)",
+                    )
+                _propagate_format_to_subparsers(sub)
 
 
 __all__ = ["build_parser"]
