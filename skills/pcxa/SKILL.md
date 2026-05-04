@@ -21,45 +21,58 @@ Then `pcxa update` self-upgrades from GitHub. The CLI prints a one-line notice t
 
 ## Setup & Authentication
 
-**Preferred — Browser login (no password needed):**
+Always start by running `pcxa whoami` to see the current state. The output tells you whether the user is authenticated and whether a project is set. Only run setup steps that are actually missing.
 
-Tell the user to run this in their terminal:
-```
-pcxa login
-```
-This opens `pcxa.app` in the browser. The user signs in normally (supports MFA, SSO), then the CLI captures the tokens automatically. No password is typed into the terminal.
+### Step 1 — Authentication (drive it yourself, don't punt to a terminal)
 
-**Fallback — Password-based login:**
-
-```
-pcxa setup -u THEIR_EMAIL
-```
-Prompts for password securely. Use this if browser login is unavailable.
-
-**Step 2 — Check auth and project (Claude does this):**
-```bash
-pcxa whoami        # shows the resolved credentials path on the "Creds:" line
-```
-
-**Credentials are global, accounts are pinned per-repo.** All accounts live in `~/.pcxa/credentials.json` (one file, multiple named profiles — never inside any repo). Each repo can pin which account to use via a committed `.pcxa` file with a `user` field. This means different repos can use different PCXA accounts with zero risk of leaking tokens through git. `pcxa login` auto-pins the user field on the active repo's `.pcxa` if it's not already set.
-
-**Project + account are configured per-repo** via the `.pcxa` file in the repo root. The CLI matches the `user` field against profile usernames to pick which credentials to use.
+If `whoami` says "No profiles configured" or a command fails with "Profile not found":
 
 ```bash
-# Set project + account for the current repo (writes .pcxa in CWD)
-pcxa set-project 10 --company 4 --user alice@example.com --local
-
-# Set global default project (when no .pcxa present)
-pcxa set-project 4
+pcxa login --no-setup
 ```
 
-`.pcxa` file format: `{ "company": 4, "project": 10, "user": "alice@example.com" }` — committed, contains no secrets.
+The `--no-setup` flag is required when you (the agent) drive login: it skips the interactive company/project picker that reads stdin, which would otherwise hang. The CLI prints two lines immediately:
 
-Pre-0.3 credential locations (`~/.file_explorer/config.json`, `<repo>/.pcxa-credentials.json`) are auto-migrated on first run.
+```
+Opening browser to authenticate...
+  If your browser does not open automatically, visit:
+  https://www.pcxa.app/auth/cli-auth?port=PORT&state=STATE
+```
 
-If `whoami` shows "Project: not set" and no `.pcxa` exists, ask the user which project to use, then run `pcxa set-project ID --local`.
+**Read those lines from stdout, then surface the URL to the user as a clickable markdown link.** The CLI tries `webbrowser.open()` but that's usually a no-op in WSL/headless — the user opening the link manually is the normal path. They sign in (MFA/SSO supported), the page redirects to a localhost callback, the CLI captures tokens, the command exits.
 
-If a command fails with "Profile not found", tell the user to run `pcxa login` in their terminal.
+Run with a generous bash timeout (e.g., 180s) since the user may take a moment to sign in. The CLI's own `--timeout` defaults to 120s; pass `--timeout 300` if you want longer.
+
+If browser login isn't viable (rare — only if the host can't reach `pcxa.app`), fall back to password login: `pcxa setup -u USER_EMAIL` (prompts for password — only works if the user can run it themselves).
+
+### Step 2 — Pick a project
+
+After login (or if `whoami` shows `Project: not set`), drive the project picker yourself:
+
+```bash
+pcxa projects -f table       # list all (company_id, project_id) the user has access to
+```
+
+Show that list to the user, ask which project they want, then:
+
+```bash
+# When the conversation/CWD is inside a repo that maps 1:1 to a PCXA project,
+# pin it locally so future runs in this repo are auto-scoped:
+pcxa set-project PROJECT_ID --company COMPANY_ID --local
+
+# Otherwise, set the global default for this user:
+pcxa set-project PROJECT_ID --company COMPANY_ID
+```
+
+Always pass `--company` when picking — `--local` writes a `.pcxa` file in CWD; without `--local`, the choice is saved in the global profile.
+
+### How resolution works
+
+Project scope resolves in this order: **repo `.pcxa` file** > **global profile default**. `.pcxa` is committed (no secrets — just `{ "company": 4, "project": 10, "user": "alice@example.com" }`). Different repos can pin different accounts via the `user` field; the CLI matches it against profile usernames in `~/.pcxa/credentials.json`.
+
+Credentials are global at `~/.pcxa/credentials.json` (one file, never inside a repo). Pre-0.3 locations (`~/.file_explorer/config.json`, `<repo>/.pcxa-credentials.json`) are auto-migrated on first run.
+
+State to surface to the user on the first turn: `whoami` shows `Active profile`, `User`, `Company`, `Project` (with `(from .pcxa)` annotation when applicable), `Creds:`, and `Repo pin:`. If you ran setup steps, echo the resulting scope back ("Operating on project Acme Tower (4)") so the user can correct you before any writes.
 
 ## Project Metadata
 

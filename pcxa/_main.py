@@ -18,6 +18,7 @@ from pcxa._update import _check_for_update, _print_update_notice
 
 from pcxa.commands.auth import (
     cmd_login,
+    cmd_projects,
     cmd_set_project,
     cmd_setup,
     cmd_whoami,
@@ -165,7 +166,7 @@ from pcxa.commands.tags_folders import DELETION_TAG  # noqa: F401  (re-export fo
 from pcxa._update import cmd_update
 
 
-AUTH_FREE = {"login", "setup", "whoami", "set-project", "update"}
+AUTH_FREE = {"login", "setup", "whoami", "set-project", "projects", "update"}
 
 
 HANDLERS = {
@@ -301,6 +302,8 @@ def main():
                 cmd_whoami(None, args)
             elif args.command == "set-project":
                 cmd_set_project(args)
+            elif args.command == "projects":
+                cmd_projects(args)
             elif args.command == "update":
                 cmd_update(args)
         finally:

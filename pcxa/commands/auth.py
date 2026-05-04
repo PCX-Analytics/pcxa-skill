@@ -196,9 +196,12 @@ def cmd_login(args):
     api_url = (args.url or "https://api.pcxa.app").rstrip("/")
     auth_url = f"{frontend_url}/auth/cli-auth?port={port}&state={state}"
 
-    print("Opening browser to authenticate...")
-    print(f"  If your browser does not open automatically, visit:\n  {auth_url}")
-    webbrowser.open(auth_url)
+    print("Opening browser to authenticate...", flush=True)
+    print(f"  If your browser does not open automatically, visit:\n  {auth_url}", flush=True)
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass  # WSL / headless / no BROWSER set — URL is printed above
 
     timeout = getattr(args, "timeout", 120) or 120
     if not done.wait(timeout=timeout):
@@ -244,6 +247,12 @@ def cmd_login(args):
 
     # If in a git repo, auto-detect and set company/project, then write .pcxa.
     # Use existing .pcxa if found, otherwise create one at the git root.
+    # Skipped when --no-setup is passed (agent-driven login: agent will run
+    # `pcxa projects` + `pcxa set-project` after login completes).
+    if getattr(args, "no_setup", False):
+        print("\n  Project not set. Run `pcxa projects` to list, "
+              "then `pcxa set-project <id> [--local]`.")
+        return
     local_path = find_local_config_path()
     if local_path is None:
         git_root = find_git_root()
@@ -251,6 +260,68 @@ def cmd_login(args):
             local_path = git_root / LOCAL_CONFIG_NAME
     if local_path is not None:
         _setup_repo_config(api_url, result.get("access"), result.get("username"), local_path)
+
+
+def cmd_projects(args):
+    """List all (company, project) pairs the active profile has access to.
+
+    Used by Claude Code (and other agents) after `pcxa login --no-setup` to
+    let the user pick a project without an interactive stdin prompt inside
+    the login flow.
+    """
+    from pcxa._output import out_json, out_table
+
+    config = load_config()
+    name = getattr(args, "profile", None) or config.get("default_profile")
+    profiles = config.get("profiles", {})
+    if not name or name not in profiles:
+        print("No active profile. Run: pcxa login", file=sys.stderr)
+        sys.exit(1)
+    profile = profiles[name]
+    if not profile.get("access_token"):
+        print(f"Profile '{name}' not authenticated. Run: pcxa login", file=sys.stderr)
+        sys.exit(1)
+
+    base = profile["url"].rstrip("/")
+    session = requests.Session()
+    session.headers["Authorization"] = f"Bearer {profile['access_token']}"
+
+    try:
+        resp = session.get(f"{base}/api/companies/", timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        companies = data.get("results", data) if isinstance(data, dict) else data
+    except Exception as e:
+        print(f"Could not list companies: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    rows = []
+    for c in companies or []:
+        cid = c.get("id")
+        cname = c.get("name", "")
+        try:
+            resp = session.get(f"{base}/api/companies/{cid}/projects/", timeout=15)
+            resp.raise_for_status()
+            d = resp.json()
+            projects = d.get("results", d) if isinstance(d, dict) else d
+        except Exception:
+            projects = []
+        for p in projects or []:
+            rows.append({
+                "company_id": cid,
+                "company_name": cname,
+                "project_id": p.get("id"),
+                "project_name": p.get("name", ""),
+                "code": p.get("code", "") or "",
+            })
+
+    if args.format == "json":
+        out_json(rows)
+    else:
+        if not rows:
+            print("No projects found across your companies.")
+            return
+        out_table(rows, ["company_id", "company_name", "project_id", "project_name", "code"])
 
 
 def cmd_setup(args):

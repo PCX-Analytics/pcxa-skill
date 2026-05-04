@@ -30,6 +30,13 @@ def build_parser():
     p.add_argument("--frontend-url", default="https://www.pcxa.app", help="Frontend URL")
     p.add_argument("--profile", help="Profile name (default: prod)")
     p.add_argument("--timeout", type=int, default=120, help="Seconds to wait for browser (default: 120)")
+    p.add_argument("--no-setup", action="store_true",
+                   help="Skip the post-login interactive company/project picker. Use when an agent (e.g. Claude Code) drives login non-interactively; the agent should follow up with `pcxa projects` and `pcxa set-project`.")
+
+    # ── projects (list accessible projects across companies) ──
+    p = sub.add_parser("projects", help="List all projects you have access to (across companies)")
+    p.add_argument("-f", "--format", choices=("json", "table"), default="json", help="Output format")
+    p.add_argument("--profile", help="Profile name (default: active)")
 
     # ── setup ──
     p = sub.add_parser("setup", help="Configure profile and login (password-based)")
