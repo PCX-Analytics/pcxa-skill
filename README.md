@@ -61,6 +61,36 @@ git clone https://github.com/PCX-Analytics/pcxa-skill.git ~/pcxa-skill
 pipx install -e ~/pcxa-skill        # edits to ~/pcxa-skill take effect immediately
 ```
 
+## Updates
+
+The CLI checks `https://api.github.com/repos/PCX-Analytics/pcxa-skill/releases/latest`
+once every 24 hours and prints a one-line stderr notice when a newer version
+is published. Disable with `PCXA_NO_UPDATE_CHECK=1`. The notice text adapts
+to where it's running:
+
+| Install mode | What the notice tells you to do |
+|---|---|
+| Claude Code plugin | `in Claude Code run /plugin update pcxa@pcxa-skill and restart` |
+| pipx | `run pcxa update` (self-upgrades from GitHub) |
+| Editable checkout | `run git pull in the pcxa-skill checkout` |
+
+**Plugin auto-update is opt-in per marketplace.** Third-party marketplaces
+(this one) ship with auto-update OFF by default — coworkers will keep running
+whichever version they first installed until they explicitly update. To pick
+up new releases on every session start instead, run `/plugin` in Claude Code
+and toggle auto-update ON for the `pcxa-skill` marketplace once. Even with
+auto-update on, **Claude Code must be restarted** before the new SKILL.md and
+`bin/pcxa` take effect.
+
+Manual one-shot update from inside Claude Code:
+
+```
+/plugin marketplace update pcxa-skill
+/plugin update pcxa@pcxa-skill
+```
+
+Then restart.
+
 ## First-run auth
 
 From a terminal (not from Claude), log in once:

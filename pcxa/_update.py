@@ -38,17 +38,21 @@ def _parse_version(s):
 
 
 def _detect_install_mode():
-    """Return ('editable', repo_path) | ('site-packages', None) | ('script', None).
+    """Return ('plugin', None) | ('editable', repo_path) | ('site-packages', None) | ('script', None).
 
+    Plugin install:   running from Claude Code's marketplace cache (no `pcxa update` self-upgrade — Claude Code manages the install).
     Editable install: package lives inside a git checkout (has .git nearby).
     """
     here = Path(__file__).resolve().parent
+    parts = here.parts
+    if ".claude" in parts and "plugins" in parts and "cache" in parts:
+        return ("plugin", None)
     if (here / ".git").exists():
         return ("editable", here)
     parent_git = here.parent / ".git"
     if parent_git.exists():
         return ("editable", here.parent)
-    if "site-packages" in str(here):
+    if "site-packages" in parts:
         return ("site-packages", None)
     return ("script", None)
 
@@ -83,18 +87,39 @@ def _check_for_update():
 
 
 def _print_update_notice(latest):
-    """Yellow-ish, non-blocking, single line on stderr."""
+    """Yellow-ish, non-blocking, single line on stderr.
+
+    The "how to update" hint depends on install mode: plugin installs are
+    managed by Claude Code (`/plugin update`), pipx installs use `pcxa update`,
+    editable checkouts use `git pull`.
+    """
     if not latest:
         return
-    msg = f"pcxa: {latest} available (current {__version__}) — run `pcxa update`"
+    mode, _ = _detect_install_mode()
+    if mode == "plugin":
+        action = "in Claude Code run `/plugin update pcxa@pcxa-skill` and restart"
+    elif mode == "editable":
+        action = "run `git pull` in the pcxa-skill checkout"
+    else:
+        action = "run `pcxa update`"
+    msg = f"pcxa: {latest} available (current {__version__}) — {action}"
     if sys.stderr.isatty():
         msg = f"\033[33m{msg}\033[0m"
     print(msg, file=sys.stderr)
 
 
 def cmd_update(args):
-    """Self-update from GitHub. Detects editable installs and prints git-pull instead."""
+    """Self-update from GitHub. Detects install mode and routes accordingly."""
     mode, repo_path = _detect_install_mode()
+    if mode == "plugin":
+        print("Plugin install detected (Claude Code manages this).")
+        print("To update, in Claude Code run:")
+        print("  /plugin marketplace update pcxa-skill")
+        print("  /plugin update pcxa@pcxa-skill")
+        print("Then restart Claude Code so the new SKILL.md and bin/pcxa load.")
+        print("Tip: toggle auto-update for the pcxa-skill marketplace via /plugin")
+        print("     to pick up new versions on every session start.")
+        return
     if mode == "editable":
         print(f"Editable install detected at: {repo_path}")
         print("To update, run:")
