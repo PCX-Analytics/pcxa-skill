@@ -1,0 +1,124 @@
+name: Release
+
+# Tag-triggered release. Push a `pcxa--v<MAJOR>.<MINOR>.<PATCH>` tag to
+# the repo and this workflow will:
+#
+#   1. Verify the tag's version matches all 4 source-of-truth files
+#      (pyproject.toml, pcxa/__init__.py, .claude-plugin/plugin.json,
+#      .claude-plugin/marketplace.json — twice in marketplace).
+#      If anything is out of sync the run fails before publishing.
+#   2. Generate release notes from commit subjects since the previous
+#      `pcxa--v*` tag.
+#   3. Create the GitHub release.
+#
+# The recommended way to cut a release is `scripts/release.sh <version>`,
+# which bumps the 4 files, commits, tags, and pushes — this workflow then
+# takes over. Pushing a tag by hand also works as long as the version
+# files match.
+
+on:
+  push:
+    tags:
+      - 'pcxa--v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to (re-)publish (e.g. pcxa--v0.3.4)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag (push or workflow_dispatch)
+        id: tagref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REF="${{ github.event.inputs.tag }}"
+          else
+            REF="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the tag (full history for changelog)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tagref.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        env:
+          TAG: ${{ steps.tagref.outputs.tag }}
+        run: |
+          VER="${TAG#pcxa--v}"
+          if ! echo "$VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Tag $TAG does not match pcxa--vX.Y.Z"
+            exit 1
+          fi
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version files match the tag
+        env:
+          EXPECTED: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            local label="$1" actual="$2"
+            if [ "$actual" != "$EXPECTED" ]; then
+              echo "::error::$label is $actual, expected $EXPECTED"
+              fail=1
+            fi
+          }
+          check "pyproject.toml"                "$(grep -E '^version = ' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          check "pcxa/__init__.py"              "$(grep -E '^__version__' pcxa/__init__.py | sed -E 's/.*"([^"]+)".*/\1/')"
+          check ".claude-plugin/plugin.json"    "$(jq -r '.version' .claude-plugin/plugin.json)"
+          check "marketplace.json (top)"        "$(jq -r '.version' .claude-plugin/marketplace.json)"
+          check "marketplace.json (plugins[0])" "$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)"
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: Build release notes from commits since previous tag
+        id: notes
+        run: |
+          set -euo pipefail
+          PREV="$(git describe --tags --abbrev=0 --match='pcxa--v*' "${GITHUB_SHA}^" 2>/dev/null || true)"
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..${GITHUB_SHA}"
+            HEADER="Changes since $PREV"
+          else
+            RANGE="${GITHUB_SHA}"
+            HEADER="Initial tagged release"
+          fi
+          {
+            echo "## $HEADER"
+            echo
+            git log "$RANGE" --pretty=format:'- %s' --reverse
+            echo
+          } > /tmp/notes.md
+          {
+            echo "notes<<EOF"
+            cat /tmp/notes.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists — refreshing notes"
+            gh release edit "$TAG" \
+              --title "pcxa v$VER" \
+              --notes-file /tmp/notes.md
+          else
+            gh release create "$TAG" \
+              --title "pcxa v$VER" \
+              --notes-file /tmp/notes.md
+          fi

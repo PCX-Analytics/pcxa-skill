@@ -1,0 +1,75 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Release: cut new version",
+      "detail": "Bump version files, commit, tag (pcxa--v<version>), push. Idempotent — safe to re-run after a partial failure.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/release.sh",
+      "args": ["${input:releaseVersion}"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Release: re-publish existing tag",
+      "detail": "Trigger the GitHub release workflow against an already-pushed tag (rebuilds notes, refreshes the release). Use after a workflow failure.",
+      "type": "shell",
+      "command": "gh",
+      "args": [
+        "workflow",
+        "run",
+        "release.yml",
+        "-R",
+        "PCX-Analytics/pcxa-skill",
+        "-f",
+        "tag=${input:republishTag}"
+      ],
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Release: show current version",
+      "detail": "Print the version recorded in each of the 5 source-of-truth sites.",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "echo 'pyproject.toml      :' $(grep -E '^version = ' pyproject.toml | sed -E 's/.*\"([^\"]+)\".*/\\1/'); echo 'pcxa/__init__.py    :' $(grep -E '^__version__' pcxa/__init__.py | sed -E 's/.*\"([^\"]+)\".*/\\1/'); echo 'plugin.json         :' $(jq -r '.version' .claude-plugin/plugin.json); echo 'marketplace.json top:' $(jq -r '.version' .claude-plugin/marketplace.json); echo 'marketplace plugin  :' $(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)"
+      ],
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "releaseVersion",
+      "type": "promptString",
+      "description": "New version to release (MAJOR.MINOR.PATCH, e.g. 0.3.4)"
+    },
+    {
+      "id": "republishTag",
+      "type": "promptString",
+      "description": "Tag to re-publish (e.g. pcxa--v0.3.4)"
+    }
+  ]
+}

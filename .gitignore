@@ -15,6 +15,7 @@ venv/
 .pytest_cache/
 
 # IDE / OS
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 .idea/
 .DS_Store
