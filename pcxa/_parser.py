@@ -142,7 +142,9 @@ def build_parser():
         help="csv of optional sections to compute: histogram,facets,tier2",
     )
     p.add_argument("--page", type=int, default=1)
-    p.add_argument("--page-size", dest="page_size", type=int, default=25)
+    # `--limit` is an alias for `--page-size` for symmetry with `files list`
+    # / `files content` / etc., which agent wrappers expect to use uniformly.
+    p.add_argument("--page-size", "--limit", dest="page_size", type=int, default=25)
 
     p = files_sub.add_parser("content", help="Keyword search in file text")
     p.add_argument("query", help="Keyword/phrase")
