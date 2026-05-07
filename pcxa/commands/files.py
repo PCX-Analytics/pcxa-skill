@@ -63,14 +63,6 @@ def cmd_files_search(client, args):
 
     Routes through ``semantic-search/search/`` (Pinecone semantic + BM25
     over the GIN-indexed ``FileChunk.search_vector`` + Cohere rerank).
-    The previous ``/agent-search/`` magnitude-aware path queried
-    ``FileChunk.embedding`` via pgvector cosine_distance, but per
-    migration 0010 there is no HNSW index on that column at prod scale —
-    so on large corpora the sequential scan blew the CLI's 30s socket
-    timeout. Until the backend routes ``agent_search`` through the
-    external vector store, this command is a thin wrapper around
-    ``/search/`` and the magnitude / histogram / facets / tier-2 surfaces
-    are unavailable.
     """
     params = {"q": args.query, "limit": args.page_size}
     if args.scope:
@@ -249,8 +241,7 @@ def cmd_files_content(client, args):
 
     Routes through the same endpoint the web UI search bar uses
     (semantic-search/search/) — hybrid BM25 + semantic with Cohere
-    reranking. The previous /content-search/ endpoint did an unindexed
-    ILIKE scan that timed out at scale on large corpora.
+    reranking.
     """
     params = {"q": args.query, "limit": args.limit, "source_types": "file"}
     if args.ext:

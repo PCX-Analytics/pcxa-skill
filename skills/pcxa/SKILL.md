@@ -128,7 +128,7 @@ Search results include `url` fields — always show these to users for document 
 
 **After search → read in batch.** Once `files search` returns the rows, prefer `files batch-read --chunk file_id:chunk_position` over N single `files read` calls. Each row carries a `chunk_position` — pass `file_id:chunk_position` as `--chunk` to read just the relevant excerpt + neighbors. One round trip instead of N. Use `--outline` for section maps when files are large and you need to plan further reads.
 
-> **Note:** the magnitude / histogram / facets / tier-2 / `--folder` / `--wbs-prefix` / `--date-from` / `--date-to` / `--threshold` flags previously documented here are temporarily unavailable — they were backed by the `/agent-search/` endpoint which uses pgvector cosine_distance with no HNSW index at prod scale. They will return once the backend routes that endpoint through the external vector store. For folder-scoped browsing in the meantime, use `pcxa files list --folder <id>`.
+For folder-scoped browsing, use `pcxa files list --folder <id>`.
 
 ## Tags & Folders
 
