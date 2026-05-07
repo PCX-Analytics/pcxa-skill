@@ -354,48 +354,37 @@ def cmd_files_batch_read(client, args):
 
 
 def cmd_files_content(client, args):
-    """Keyword search in indexed file text."""
-    try:
-        params = {"q": args.query, "limit": args.limit, "offset": args.offset}
-        if args.ext:
-            params["file_types"] = args.ext
-        if args.folder:
-            params["folder"] = args.folder
-        data = client.get("semantic-search/content-search/", params)
-        for r in data.get("results", []):
-            fid = r.get("file_id")
-            if fid:
-                r["url"] = client.file_url(fid, highlight=args.query)
-        if args.format == "json":
-            out_json(data)
-        else:
-            results = data.get("results", [])
-            total = data.get("total_results", len(results))
-            print(f"Content matches for '{args.query}': {total}\n")
-            rows = []
-            for r in results:
-                rows.append({
-                    "file_id": str(r.get("file_id", "")),
-                    "name": str(r.get("file_name", ""))[:40],
-                    "page": str(r.get("page_number", "-")),
-                    "match": str(r.get("content", ""))[:70],
-                    "url": r.get("url", ""),
-                })
-            out_table(rows, ["file_id", "name", "page", "match", "url"])
-    except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            # Fallback to title search
-            params = {"search": args.query, "page_size": args.limit}
-            data = client.get("files/", params)
-            if args.format == "json":
-                out_json(data)
-            else:
-                results = data.get("results", [])
-                rows = [_file_row(f) for f in results]
-                print(f"Title matches (content search unavailable): {len(rows)}\n")
-                out_table(rows, ["id", "title", "type", "folder"])
-        else:
-            raise
+    """Keyword search in indexed file text.
+
+    Routes through the same endpoint the web UI search bar uses
+    (semantic-search/search/) — hybrid BM25 + semantic with Cohere
+    reranking. The previous /content-search/ endpoint did an unindexed
+    ILIKE scan that timed out at scale on large corpora.
+    """
+    params = {"q": args.query, "limit": args.limit, "source_types": "file"}
+    if args.ext:
+        params["file_types"] = args.ext
+    data = client.get("semantic-search/search/", params)
+    for r in data.get("results", []):
+        fid = r.get("file_id")
+        if fid:
+            r["url"] = client.file_url(fid, highlight=args.query)
+    if args.format == "json":
+        out_json(data)
+    else:
+        results = data.get("results", [])
+        total = data.get("total_results", len(results))
+        print(f"Content matches for '{args.query}': {total}\n")
+        rows = []
+        for r in results:
+            rows.append({
+                "file_id": str(r.get("file_id", "")),
+                "name": str(r.get("file_name", ""))[:40],
+                "page": str(r.get("page_number", "-")),
+                "match": str(r.get("content", ""))[:70],
+                "url": r.get("url", ""),
+            })
+        out_table(rows, ["file_id", "name", "page", "match", "url"])
 
 
 def cmd_files_read(client, args):

@@ -146,12 +146,13 @@ def build_parser():
     # / `files content` / etc., which agent wrappers expect to use uniformly.
     p.add_argument("--page-size", "--limit", dest="page_size", type=int, default=25)
 
-    p = files_sub.add_parser("content", help="Keyword search in file text")
+    p = files_sub.add_parser(
+        "content",
+        help="Keyword search in file text (hybrid BM25 + semantic, same as web UI)",
+    )
     p.add_argument("query", help="Keyword/phrase")
     p.add_argument("--ext", help="File type filter")
-    p.add_argument("--folder", type=int)
-    p.add_argument("--limit", type=int, default=25)
-    p.add_argument("--offset", type=int, default=0)
+    p.add_argument("--limit", type=int, default=25, help="Max results (server-capped at 50)")
 
     p = files_sub.add_parser("read", help="Read file content (windowed)")
     p.add_argument("file_id", type=int)

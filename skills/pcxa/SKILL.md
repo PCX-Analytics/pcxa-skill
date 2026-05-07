@@ -102,7 +102,7 @@ pcxa files search "query" --folder 42                                     # scop
 pcxa files search "query" --wbs-prefix 1.4 --scope activity               # scope to a WBS branch
 pcxa files search "query" --date-from 2024-09-01 --date-to 2024-12-31     # forensic date window
 pcxa files search "query" --page 2 --page-size 50                         # next page
-pcxa files content "exact phrase" --ext PDF                   # keyword in file text
+pcxa files content "BRG report" --ext PDF                     # keyword search in file text (hybrid BM25 + semantic, same as web UI)
 pcxa files read FILE_ID --outline                             # section map
 pcxa files read FILE_ID                                       # first 5 chunks
 pcxa files read FILE_ID --start 5                             # next window
