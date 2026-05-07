@@ -62,8 +62,10 @@ all_versions_match_target() {
 }
 
 bump_files() {
-  sed -i -E "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/"          pyproject.toml
-  sed -i -E "s/^__version__ = \"[^\"]+\"/__version__ = \"${VERSION}\"/" pcxa/__init__.py
+  # perl -i is portable across BSD (macOS) and GNU sed environments;
+  # `sed -i -E` is not — BSD sed parses `-E` as the backup extension.
+  perl -i -pe "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/"          pyproject.toml
+  perl -i -pe "s/^__version__ = \"[^\"]+\"/__version__ = \"${VERSION}\"/" pcxa/__init__.py
   jq --indent 2 --arg v "$VERSION" '.version = $v' \
     .claude-plugin/plugin.json > .claude-plugin/plugin.json.tmp \
     && mv .claude-plugin/plugin.json.tmp .claude-plugin/plugin.json
