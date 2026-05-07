@@ -101,50 +101,18 @@ def build_parser():
 
     p = files_sub.add_parser(
         "search",
-        help="Semantic search with magnitude, histogram, facets (LLM-friendly)",
+        help="Hybrid semantic + keyword search (same endpoint as the web UI)",
     )
     p.add_argument("query", help="Natural language query")
     p.add_argument(
         "--scope",
         help="Sources to search: csv subset of file,activity,drawing,photo (default: all)",
     )
-    p.add_argument(
-        "--threshold", type=float, default=0.65,
-        help="Cosine similarity floor for text sources (default 0.65)",
-    )
-    p.add_argument(
-        "--image-threshold", dest="image_threshold", type=float, default=0.40,
-        help="Cosine similarity floor for drawings/photos (default 0.40, lower because cross-modal)",
-    )
-    p.add_argument(
-        "--tier2-threshold", dest="tier2_threshold", type=float, default=None,
-        help="Lower threshold for the 'what would I gain' preview (default: threshold - 0.10)",
-    )
-    p.add_argument("--ext", help="File type filter — narrows page only, not magnitude")
-    p.add_argument(
-        "--folder", dest="folder_id", type=int,
-        help="Scope file results to this folder + descendants (recursive)",
-    )
-    p.add_argument(
-        "--wbs-prefix", dest="wbs_prefix",
-        help="Scope activity results to a WBS prefix (e.g. 1.4 matches 1.4, 1.4.2, 1.4.2.1)",
-    )
-    p.add_argument(
-        "--date-from", dest="date_from",
-        help="Lower date bound (YYYY-MM-DD). Files: extracted_document_date; activities: planned_start",
-    )
-    p.add_argument(
-        "--date-to", dest="date_to",
-        help="Upper date bound (YYYY-MM-DD). Same fields as --date-from",
-    )
-    p.add_argument(
-        "--include",
-        help="csv of optional sections to compute: histogram,facets,tier2",
-    )
-    p.add_argument("--page", type=int, default=1)
+    p.add_argument("--ext", help="File type filter (csv, e.g. PDF,DOCX)")
     # `--limit` is an alias for `--page-size` for symmetry with `files list`
     # / `files content` / etc., which agent wrappers expect to use uniformly.
-    p.add_argument("--page-size", "--limit", dest="page_size", type=int, default=25)
+    p.add_argument("--page-size", "--limit", dest="page_size", type=int, default=25,
+                   help="Max results (server-capped at 50)")
 
     p = files_sub.add_parser(
         "content",

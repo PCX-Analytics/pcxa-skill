@@ -59,44 +59,28 @@ def cmd_files_list(client, args):
 
 
 def cmd_files_search(client, args):
-    """Magnitude-aware semantic search across files + activities (+ drawings/photos).
+    """Semantic + keyword (hybrid) search — same endpoint the web UI uses.
 
-    Returns dataset magnitude (unique files / activities / chunks / folders),
-    optional similarity histogram, optional folder / file-type / WBS facets,
-    a tier-2 lower-threshold preview, and a paginated page of concrete results.
-
-    Designed for an LLM to reason about *how big* a result set is before
-    committing to read individual chunks — avoids the top-N trap where
-    "4 strong matches" and "800 spread across 14 folders" look identical.
+    Routes through ``semantic-search/search/`` (Pinecone semantic + BM25
+    over the GIN-indexed ``FileChunk.search_vector`` + Cohere rerank).
+    The previous ``/agent-search/`` magnitude-aware path queried
+    ``FileChunk.embedding`` via pgvector cosine_distance, but per
+    migration 0010 there is no HNSW index on that column at prod scale —
+    so on large corpora the sequential scan blew the CLI's 30s socket
+    timeout. Until the backend routes ``agent_search`` through the
+    external vector store, this command is a thin wrapper around
+    ``/search/`` and the magnitude / histogram / facets / tier-2 surfaces
+    are unavailable.
     """
-    params = {
-        "q": args.query,
-        "threshold": args.threshold,
-        "image_threshold": args.image_threshold,
-        "page": args.page,
-        "page_size": args.page_size,
-    }
+    params = {"q": args.query, "limit": args.page_size}
     if args.scope:
-        params["scope"] = args.scope
-    if args.tier2_threshold is not None:
-        params["tier2_threshold"] = args.tier2_threshold
+        params["source_types"] = args.scope
     if args.ext:
         params["file_types"] = args.ext
-    if getattr(args, "folder_id", None) is not None:
-        params["folder_id"] = args.folder_id
-    if getattr(args, "wbs_prefix", None):
-        params["wbs_prefix"] = args.wbs_prefix
-    if getattr(args, "date_from", None):
-        params["date_from"] = args.date_from
-    if getattr(args, "date_to", None):
-        params["date_to"] = args.date_to
-    if args.include:
-        params["include"] = args.include
 
-    data = client.get("semantic-search/agent-search/", params)
+    data = client.get("semantic-search/search/", params)
 
-    # Annotate page rows with file URLs for click-through.
-    for r in (data.get("page") or {}).get("results", []):
+    for r in data.get("results", []):
         fid = r.get("file_id")
         if fid:
             r["url"] = client.file_url(fid, highlight=args.query)
@@ -105,125 +89,32 @@ def cmd_files_search(client, args):
         out_json(data)
         return
 
-    _print_agent_search(data, query=args.query)
+    _print_search_results(data, query=args.query)
 
 
-def _print_agent_search(data, *, query):
-    """Render an agent-search response as a compact, scan-friendly report.
-
-    The text format is the primary design target: this is what the LLM
-    reads back from the tool. JSON output stays available via --format=json.
-    """
-    threshold = data.get("threshold")
-    image_threshold = data.get("image_threshold")
-    print(
-        f"Query: {query!r}  threshold={threshold}  image_threshold={image_threshold}"
-    )
-
-    mag = data.get("magnitude") or {}
-    print("\nMagnitude:")
-    print(f"  Total chunks:    {mag.get('total_chunks', 0):>8,}")
-    by_type = mag.get("by_file_type") or {}
-    if by_type:
-        type_str = ", ".join(f"{k}: {v}" for k, v in sorted(by_type.items(), key=lambda x: -x[1]))
-        print(f"  Files:           {mag.get('unique_files', 0):>8,}  ({type_str})")
-    else:
-        print(f"  Files:           {mag.get('unique_files', 0):>8,}")
-    print(f"  Activities:      {mag.get('unique_activities', 0):>8,}")
-    print(f"  Drawings:        {mag.get('unique_drawings', 0):>8,}")
-    print(f"  Photos:          {mag.get('unique_photos', 0):>8,}")
-    print(f"  Folders touched: {mag.get('unique_folders', 0):>8,}")
-    truncated = mag.get("truncated") or {}
-    if truncated:
-        flagged = ", ".join(f"{k}=10000+" for k in truncated)
-        print(f"  (Counts truncated for: {flagged} — broaden filters to narrow.)")
-
-    hist = data.get("histogram")
-    if hist:
-        print("\nHistogram (similarity → counts):")
-        max_chunks = max((b.get("chunks", 0) for b in hist), default=1) or 1
-        for b in hist:
-            bar = "#" * min(40, max(1, int(b.get("chunks", 0) / max_chunks * 40))) if b.get("chunks") else ""
-            label = b["bucket"].ljust(11)
-            print(
-                f"  {label} {bar:<40} chunks={b.get('chunks', 0):>5}  "
-                f"files={b.get('files', 0):>4}  activities={b.get('activities', 0):>4}"
-            )
-
-    tier2 = data.get("tier2")
-    if tier2:
-        print(
-            f"\nTier-2 preview (threshold={tier2.get('threshold')}):  "
-            f"files={tier2.get('unique_files', 0)} (Δ{tier2.get('delta_files', 0):+d})  "
-            f"activities={tier2.get('unique_activities', 0)} (Δ{tier2.get('delta_activities', 0):+d})"
-        )
-
-    facets = data.get("facets") or {}
-    if facets.get("by_folder"):
-        print("\nTop folders:")
-        for f in facets["by_folder"][:10]:
-            path = (f.get("path") or "")[:60]
-            print(
-                f"  {path:<60}  files={f.get('matched_files', 0):>4}  "
-                f"chunks={f.get('matched_chunks', 0):>5}  top={f.get('top_score', 0):.3f}"
-            )
-    if facets.get("by_file_type"):
-        print("\nBy file type:")
-        for f in facets["by_file_type"]:
-            print(
-                f"  {f.get('file_type', ''):<8}  files={f.get('matched_files', 0):>4}  "
-                f"chunks={f.get('matched_chunks', 0):>5}  top={f.get('top_score', 0):.3f}"
-            )
-    if facets.get("by_activity_branch"):
-        print("\nBy activity branch (WBS prefix):")
-        for f in facets["by_activity_branch"]:
-            print(
-                f"  {f.get('wbs_prefix', ''):<10}  activities={f.get('matched_activities', 0):>4}  "
-                f"top={f.get('top_score', 0):.3f}"
-            )
-
-    suggestions = data.get("suggestions") or []
-    if suggestions:
-        print("\nSuggestions:")
-        for s in suggestions:
-            kind = s.get("kind", "?")
-            if kind == "narrow_to_folder":
-                print(
-                    f"  - narrow to folder {s.get('folder_id')} ({s.get('path')}): "
-                    f"~{s.get('predicted_files')} files"
-                )
-            elif kind == "lower_threshold":
-                pf = s.get("predicted_files")
-                pf_str = f"~{pf} files" if pf is not None else "(unknown count)"
-                note = f"  [{s['note']}]" if s.get("note") else ""
-                print(f"  - lower threshold to {s.get('to')}: {pf_str}{note}")
-            elif kind == "raise_threshold":
-                print(f"  - raise threshold to {s.get('to')}: ~{s.get('predicted_files')} files")
-            else:
-                print(f"  - {s}")
-
-    page = data.get("page") or {}
-    results = page.get("results") or []
-    print(
-        f"\nPage {page.get('number', 1)}/{page.get('total_pages', 1)} "
-        f"({len(results)} of {page.get('total', 0)}):"
-    )
+def _print_search_results(data, *, query):
+    """Render a ``/semantic-search/search/`` response as a compact table."""
+    results = data.get("results") or []
+    total = data.get("total_results", len(results))
+    hybrid = data.get("hybrid_enabled")
+    suffix = "  (hybrid)" if hybrid else ""
+    print(f"Search results for {query!r}: {total}{suffix}\n")
     if not results:
-        print("  (no results on this page)")
+        print("  (no results)")
         return
-
     rows = []
     for r in results:
-        if r.get("source_type") == "file":
+        src = r.get("source_type") or "file"
+        if src == "file":
             rows.append({
                 "score": f"{r.get('score', 0):.3f}",
                 "kind": "file",
                 "id": str(r.get("file_id", "")),
                 "name": str(r.get("file_name") or r.get("title") or "")[:45],
-                "where": (r.get("folder_path") or "")[:35] + (f" p{r['page_number']}" if r.get("page_number") else ""),
+                "where": (r.get("folder_path") or "")[:30] + (f" p{r['page_number']}" if r.get("page_number") else ""),
                 "url": r.get("url", ""),
             })
-        elif r.get("source_type") == "activity":
+        elif src == "activity":
             rows.append({
                 "score": f"{r.get('score', 0):.3f}",
                 "kind": "activity",
@@ -235,8 +126,8 @@ def _print_agent_search(data, *, query):
         else:
             rows.append({
                 "score": f"{r.get('score', 0):.3f}",
-                "kind": r.get("source_type", "?"),
-                "id": str(r.get(f"{r.get('source_type')}_id", "") or ""),
+                "kind": src,
+                "id": str(r.get(f"{src}_id", "") or ""),
                 "name": str(r.get("title", ""))[:45],
                 "where": "",
                 "url": "",

@@ -95,14 +95,10 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 ```bash
 pcxa files list --ext PDF --search "keyword" --limit 50
 pcxa files list --tags "urgent,review" --tags-mode all   # AND: files with ALL tags
-pcxa files search "natural language query"                                # magnitude + page
-pcxa files search "query" --include histogram,facets,tier2                # full picture
-pcxa files search "query" --scope file --threshold 0.75                   # narrower
-pcxa files search "query" --folder 42                                     # scope to a folder + descendants
-pcxa files search "query" --wbs-prefix 1.4 --scope activity               # scope to a WBS branch
-pcxa files search "query" --date-from 2024-09-01 --date-to 2024-12-31     # forensic date window
-pcxa files search "query" --page 2 --page-size 50                         # next page
-pcxa files content "BRG report" --ext PDF                     # keyword search in file text (hybrid BM25 + semantic, same as web UI)
+pcxa files search "natural language query"                    # hybrid BM25 + semantic (same endpoint as the web UI)
+pcxa files search "query" --scope file,activity               # restrict source types (csv: file,activity,drawing,photo)
+pcxa files search "query" --ext PDF --limit 25                # narrow to file type, page-size up to 50
+pcxa files content "BRG report" --ext PDF                     # alias of `files search` scoped to files (same hybrid endpoint)
 pcxa files read FILE_ID --outline                             # section map
 pcxa files read FILE_ID                                       # first 5 chunks
 pcxa files read FILE_ID --start 5                             # next window
@@ -128,15 +124,11 @@ pcxa files list --tags to_delete                         # list everything pendi
 
 Search results include `url` fields — always show these to users for document links.
 
-**Search response shape:** `pcxa files search` returns dataset *magnitude* (unique files / activities / chunks / folders, plus a per-file-type breakdown), an opt-in *histogram* of similarity buckets, opt-in *facets* (top folders, file types, WBS branches), an opt-in *tier-2 preview* showing what dropping the threshold would yield, plus a paginated *page* of concrete results above the threshold. Read magnitude first to decide your strategy: <10 results → read them all; tens → cluster by folder; hundreds → narrow before reading.
+**Search response shape:** `pcxa files search` returns `{query, total_results, results, hybrid_enabled}` — a top-N reranked list (server-capped at 50). Each row carries `score`, `file_id`/`activity_id`, `file_name`/`title`, `folder_path`, `page_number`, `chunk_position`, and a `url`. Hybrid means the result is the union of Pinecone semantic similarity and BM25 over the project's chunk text, RRF-fused and Cohere-reranked — the same path the web UI's search bar uses.
 
-**After search → read in batch.** Once `files search` returns the page rows, prefer `files batch-read --chunk file_id:chunk_index` over N single `files read` calls. Each page row carries a `chunk_position` — pass `file_id:chunk_position` as `--chunk` to read just the relevant excerpt + neighbors. One round trip instead of N. Use `--outline` for section maps when files are large and you need to plan further reads.
+**After search → read in batch.** Once `files search` returns the rows, prefer `files batch-read --chunk file_id:chunk_position` over N single `files read` calls. Each row carries a `chunk_position` — pass `file_id:chunk_position` as `--chunk` to read just the relevant excerpt + neighbors. One round trip instead of N. Use `--outline` for section maps when files are large and you need to plan further reads.
 
-**Drill-down filters** (re-run search with these to scope down):
-- `--folder <id>` scopes file results to a folder + all descendants (use after seeing facets surface a hot folder).
-- `--wbs-prefix 1.4` scopes activity results to a WBS branch.
-- `--date-from / --date-to YYYY-MM-DD` restricts to a date window. Files filter by the AI-extracted document date; activities by their planned_start. Items with no date are excluded from date-bound queries.
-- `--ext` narrows the *page only* — magnitude/histogram/facets reflect the full scope at the active threshold so the haystack size stays stable as you experiment with `--ext` filters.
+> **Note:** the magnitude / histogram / facets / tier-2 / `--folder` / `--wbs-prefix` / `--date-from` / `--date-to` / `--threshold` flags previously documented here are temporarily unavailable — they were backed by the `/agent-search/` endpoint which uses pgvector cosine_distance with no HNSW index at prod scale. They will return once the backend routes that endpoint through the external vector store. For folder-scoped browsing in the meantime, use `pcxa files list --folder <id>`.
 
 ## Tags & Folders
 
