@@ -38,10 +38,20 @@ def cmd_files_list(client, args):
         params["category"] = args.category
     if args.search:
         params["search"] = args.search
+        # Default to fuzzy: backend returns exact-substring matches first
+        # (similarity ~1.0) and then typo-tolerant matches ranked by
+        # similarity DESC, in a single paginated response. `--exact` opts
+        # back into the tighter 0.8-threshold substring mode.
+        if not getattr(args, "exact", False):
+            params["search_mode"] = "fuzzy"
     if args.index_status:
         params["search_status"] = args.index_status
-    if args.sort:
-        params["ordering"] = args.sort
+    # When --sort is unspecified and --search is supplied, omit `ordering`
+    # so the backend's TrigramSearchFilter can rank by similarity DESC.
+    # Otherwise default to -created_at to preserve the prior listing UX.
+    sort = args.sort if args.sort is not None else (None if args.search else "-created_at")
+    if sort:
+        params["ordering"] = sort
 
     if args.count_only:
         print(json.dumps({"count": client.get_count("files/", params)}))
@@ -406,6 +416,8 @@ def cmd_files_aggregate(client, args):
         params["folder"] = args.folder
     if args.search:
         params["search"] = args.search
+        if not getattr(args, "exact", False):
+            params["search_mode"] = "fuzzy"
     if args.top:
         params["top"] = args.top
 

@@ -93,7 +93,8 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 ## File Search & Reading
 
 ```bash
-pcxa files list --ext PDF --search "keyword" --limit 50
+pcxa files list --ext PDF --search "keyword" --limit 50  # title trigram (fuzzy by default; exact first)
+pcxa files list --search "concret" --exact               # tight substring only — `concret` will NOT match `Concrete`
 pcxa files list --tags "urgent,review" --tags-mode all   # AND: files with ALL tags
 pcxa files search "natural language query"                    # hybrid BM25 + semantic (same endpoint as the web UI)
 pcxa files search "query" --scope file,activity               # restrict source types (csv: file,activity,drawing,photo)
@@ -124,6 +125,8 @@ pcxa files list --tags to_delete                         # list everything pendi
 
 Search results include `url` fields — always show these to users for document links.
 
+**`--search` is fuzzy by default (`files list`, `files aggregate`, `activities list`).** Backend uses PostgreSQL trigram similarity: exact substring matches surface first (similarity ~1.0), then typo-tolerant matches ranked by similarity DESC, in a single paginated response. `concret` finds `Concrete Pour`; `0314` ranks `RFI-0314` above `Document-031499`. Pass `--exact` to opt back into tight substring matching (rejects typos — useful when the query is a known-correct identifier and you don't want fuzzy noise). The backend rate-limits fuzzy search to 100/min per user; not normally a concern for agent use.
+
 **Search response shape:** `pcxa files search` returns `{query, total_results, results, hybrid_enabled}` — a top-N reranked list (server-capped at 50). Each row carries `score`, `file_id`/`activity_id`, `file_name`/`title`, `folder_path`, `page_number`, `chunk_position`, and a `url`. Hybrid means the result is the union of Pinecone semantic similarity and BM25 over the project's chunk text, RRF-fused and Cohere-reranked — the same path the web UI's search bar uses.
 
 **After search → read in batch.** Once `files search` returns the rows, prefer `files batch-read --chunk file_id:chunk_position` over N single `files read` calls. Each row carries a `chunk_position` — pass `file_id:chunk_position` as `--chunk` to read just the relevant excerpt + neighbors. One round trip instead of N. Use `--outline` for section maps when files are large and you need to plan further reads.
@@ -153,7 +156,7 @@ pcxa files update 10 --title "New" --tags a,b --folder 5      # single file upda
 
 ```bash
 pcxa activities list --status in_progress --priority 3,4
-pcxa activities list --search "foundation" --assignee 5 --sort -due_date
+pcxa activities list --search "foundation" --assignee 5 --sort -due_date  # fuzzy by default; add --exact for tight
 pcxa activities list --tags "structural,review" --tags-mode all  # AND mode
 pcxa activities list --after 2026-03-01 --before 2026-03-31       # updated in date range
 pcxa activities list --after last_month                          # relative dates supported

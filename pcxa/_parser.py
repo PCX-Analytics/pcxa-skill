@@ -92,9 +92,14 @@ def build_parser():
     p.add_argument("--tags-mode", dest="tags_mode", choices=["any", "all"], help="any=OR (default), all=AND")
     p.add_argument("--folder", type=int, help="Folder ID")
     p.add_argument("--category", help="Category")
-    p.add_argument("--search", "-s", help="Title/description search")
+    p.add_argument("--search", "-s", help="Title search (trigram fuzzy by default; exact matches rank first)")
+    p.add_argument("--exact", action="store_true",
+                   help="Tight substring matching (rejects typos). Default is fuzzy with exact-first ranking.")
     p.add_argument("--index-status", choices=["indexed", "pending", "processing", "failed"])
-    p.add_argument("--sort", default="-created_at", help="Sort field")
+    # Default is None (not "-created_at") so fuzzy search can rank by
+    # similarity DESC. When --search is absent we fall back to -created_at
+    # in cmd_files_list. An explicit --sort always wins.
+    p.add_argument("--sort", default=None, help="Sort field (default: -created_at; similarity when --search)")
     p.add_argument("--count-only", action="store_true")
     p.add_argument("--limit", type=int, default=25)
     p.add_argument("--offset", type=int, default=0)
@@ -155,7 +160,8 @@ def build_parser():
     p.add_argument("--ext", help="File type filter")
     p.add_argument("--tags", help="Tags filter")
     p.add_argument("--folder", type=int)
-    p.add_argument("--search", "-s")
+    p.add_argument("--search", "-s", help="Title search (fuzzy by default — use --exact for tight matching)")
+    p.add_argument("--exact", action="store_true", help="Tight substring matching instead of fuzzy default")
     p.add_argument("--top", type=int, default=50)
 
     p = files_sub.add_parser("recent", help="Recently uploaded files")
@@ -274,14 +280,19 @@ def build_parser():
     p.add_argument("--type", help="Activity type ID")
     p.add_argument("--parent", type=int)
     p.add_argument("--root-only", action="store_true")
-    p.add_argument("--search", "-s")
+    p.add_argument("--search", "-s",
+                   help="Search title/description/wbs_code (fuzzy by default; exact matches rank first)")
+    p.add_argument("--exact", action="store_true",
+                   help="Tight substring matching (rejects typos). Default is fuzzy with exact-first ranking.")
     p.add_argument("--tags")
     p.add_argument("--tags-mode", dest="tags_mode", choices=["any", "all"], help="any=OR (default), all=AND")
     p.add_argument("--after", help="Updated after date (YYYY-MM-DD or relative: last_7_days, this_month, etc.)")
     p.add_argument("--before", help="Updated before date (YYYY-MM-DD or relative: last_30_days, last_quarter, etc.)")
     p.add_argument("--created-after", help="Created after date (YYYY-MM-DD or relative)")
     p.add_argument("--created-before", help="Created before date (YYYY-MM-DD or relative)")
-    p.add_argument("--sort", default="-created_at")
+    # See cmd_activities_list — None lets --search rank by similarity DESC.
+    p.add_argument("--sort", default=None,
+                   help="Sort field (default: -created_at; similarity when --search)")
     p.add_argument("--count-only", action="store_true")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--offset", type=int, default=0)

@@ -66,6 +66,11 @@ def cmd_activities_list(client, args):
         params["parent__isnull"] = "true"
     if args.search:
         params["search"] = args.search
+        # Default to fuzzy: exact substring matches surface first, then
+        # typo-tolerant matches ranked by similarity. `--exact` opts back
+        # into the tighter 0.8-threshold mode.
+        if not getattr(args, "exact", False):
+            params["search_mode"] = "fuzzy"
     if args.tags:
         params["tags"] = args.tags
         if getattr(args, "tags_mode", None):
@@ -78,8 +83,12 @@ def cmd_activities_list(client, args):
         params["created_at__gte"] = args.created_after
     if getattr(args, "created_before", None):
         params["created_at__lte"] = args.created_before
-    if args.sort:
-        params["ordering"] = args.sort
+    # When --sort is unspecified and --search is supplied, omit `ordering`
+    # so TrigramSearchFilter can rank by similarity DESC (exact matches
+    # surface first). Otherwise preserve the prior default.
+    sort = args.sort if args.sort is not None else (None if args.search else "-created_at")
+    if sort:
+        params["ordering"] = sort
 
     if args.count_only:
         print(json.dumps({"count": client.get_count("activities/", params)}))
