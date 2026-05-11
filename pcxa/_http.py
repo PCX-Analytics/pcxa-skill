@@ -129,6 +129,44 @@ def _body_length(body):
     return None
 
 
+def _resolve_proxy(scheme, target_host):
+    """Return the proxy URL for ``target_host`` or ``None`` to connect direct.
+
+    Honors the standard env-var contract used by curl/requests/etc.:
+    ``HTTP_PROXY`` / ``HTTPS_PROXY`` per scheme, with ``NO_PROXY`` as a
+    comma-separated bypass list (``*`` matches all).
+
+    The Claude Agent SDK exports ``HTTP_PROXY=http://localhost:<port>``
+    and ``HTTPS_PROXY=http://localhost:<port>`` whenever the Bash
+    subprocess is sandboxed, then strips the sandbox's network
+    namespace; without honoring those vars, every outbound request
+    dies with ``socket.gaierror`` because there's no route to the
+    target host. Surfaces in pmapp2 as "pcxa can't reach
+    http://django:8000".
+    """
+    no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    if no_proxy.strip() == "*":
+        return None
+    if no_proxy:
+        for entry in no_proxy.split(","):
+            entry = entry.strip().lstrip(".")
+            if not entry:
+                continue
+            if target_host == entry or target_host.endswith("." + entry):
+                return None
+    if scheme == "https":
+        return (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+            or None
+        )
+    return (
+        os.environ.get("HTTP_PROXY")
+        or os.environ.get("http_proxy")
+        or None
+    )
+
+
 def _request_stdlib(method, url, *, headers=None, params=None, json=None, data=None, files=None, timeout=None, stream=False):
     parsed = urlparse(url)
     if params:
@@ -163,10 +201,34 @@ def _request_stdlib(method, url, *, headers=None, params=None, json=None, data=N
     host = parsed.hostname or ""
     port = parsed.port
     path = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
-    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    conn = connection_cls(host, port=port, timeout=timeout)
+    proxy_url = _resolve_proxy(parsed.scheme, host)
+    if proxy_url:
+        proxy_parsed = urlparse(proxy_url)
+        proxy_host = proxy_parsed.hostname or "localhost"
+        proxy_port = proxy_parsed.port or (
+            443 if proxy_parsed.scheme == "https" else 80
+        )
+        if parsed.scheme == "https":
+            # CONNECT tunnel through the proxy. The target's TLS is
+            # end-to-end; the proxy only forwards bytes.
+            conn = http.client.HTTPSConnection(
+                proxy_host, port=proxy_port, timeout=timeout
+            )
+            conn.set_tunnel(host, port=port or 443)
+            request_target = path
+        else:
+            # Plain HTTP proxy: connect to proxy and send the absolute
+            # URI in the request line. Proxy parses the host header.
+            conn = http.client.HTTPConnection(
+                proxy_host, port=proxy_port, timeout=timeout
+            )
+            request_target = url
+    else:
+        connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        conn = connection_cls(host, port=port, timeout=timeout)
+        request_target = path
     try:
-        conn.request(method.upper(), path, body=body, headers=request_headers)
+        conn.request(method.upper(), request_target, body=body, headers=request_headers)
         raw = conn.getresponse()
         response_headers = {k.lower(): v for k, v in raw.getheaders()}
         if stream:
