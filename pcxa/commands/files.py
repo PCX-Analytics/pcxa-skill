@@ -503,8 +503,16 @@ def cmd_files_download(client, args):
 
 
 def cmd_files_upload(client, args):
-    """Upload one or more files (or all files in a directory)."""
-    # Resolve paths — expand directories to their file contents
+    """Upload one or more files (or all files in a directory).
+
+    Batch path (>1 file, or a directory): parallel presign+PUT with
+    --concurrency workers, metadata flushed to /files/bulk-register/ in
+    chunks. Files larger than --multipart-threshold-mb use multipart
+    presign so they bypass R2's single-PUT failure mode (>~75MB).
+
+    Single-file path: backwards-compatible behavior — multipart POST for
+    small files, presign+PUT for large.
+    """
     file_paths = []
     for p in args.paths:
         path = Path(p)
@@ -533,32 +541,329 @@ def cmd_files_upload(client, args):
             print(f"Would UPLOAD {fp.name} ({fp.stat().st_size:,} bytes) — {', '.join(parts)}")
         return
 
-    # Files > 10 MB use the 3-step presign flow (upload directly to storage
-    # provider, no bytes through server). Smaller files use multipart POST.
-    large_file_threshold = 10 * 1024 * 1024
+    multipart_threshold = getattr(args, "multipart_threshold_mb", 50) * 1024 * 1024
+    part_size = max(5, getattr(args, "part_size_mb", 16)) * 1024 * 1024  # R2 min part = 5MB
+    concurrency = max(1, min(32, getattr(args, "concurrency", 8)))
 
-    url = client._url("files/")
-    presign_url = client._url("files/presign-upload/")
-    uploaded = 0
-    for fp in file_paths:
-        title = args.title if (args.title and len(file_paths) == 1) else fp.stem
+    if len(file_paths) == 1:
+        fp = file_paths[0]
+        title = args.title or fp.stem
         file_size = fp.stat().st_size
-
         print(f"Uploading: {fp.name} ({file_size:,} bytes) ...", end=" ", flush=True)
 
-        if file_size > large_file_threshold:
-            result = _upload_via_presign(client, fp, title, args.folder, tags, presign_url, url)
+        if file_size > multipart_threshold:
+            result = _upload_via_multipart_presign(
+                client, fp, title, args.folder, tags, part_size=part_size, concurrency=concurrency
+            )
+        elif file_size > 10 * 1024 * 1024:
+            # Existing single-file presign path — back-compat for callers
+            # that rely on POST /files/ returning the full File row.
+            result = _upload_via_presign(
+                client,
+                fp,
+                title,
+                args.folder,
+                tags,
+                client._url("files/presign-upload/"),
+                client._url("files/"),
+            )
         else:
-            result = _upload_via_multipart(client, fp, title, args.folder, tags, url)
+            result = _upload_via_multipart(client, fp, title, args.folder, tags, client._url("files/"))
 
         if args.format == "json":
             out_json(result)
         else:
             print(f"OK — id={result.get('id')} title='{result.get('title')}'")
-        uploaded += 1
+        return
 
-    if len(file_paths) > 1 and args.format != "json":
-        print(f"\nUploaded {uploaded} file(s)")
+    # Batch path: parallel presign+PUT, metadata via /files/bulk-register/.
+    _upload_batch(
+        client,
+        file_paths,
+        folder=args.folder,
+        tags=tags,
+        concurrency=concurrency,
+        multipart_threshold=multipart_threshold,
+        part_size=part_size,
+        output_format=args.format,
+    )
+
+
+def _upload_batch(
+    client,
+    file_paths,
+    *,
+    folder,
+    tags,
+    concurrency,
+    multipart_threshold,
+    part_size,
+    output_format,
+    bulk_size=100,
+):
+    """Parallel presign+PUT, metadata via /files/bulk-register/.
+
+    Each worker uploads one file end-to-end (presign + PUT, or multipart
+    if large) and returns a metadata item. The main thread drains a
+    queue and flushes to bulk-register in chunks of ``bulk_size``.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    register_url = client._url("files/bulk-register/")
+    pending = []
+    pending_lock = threading.Lock()
+    created_total = 0
+    duplicate_total = 0
+    error_total = 0
+    failed_uploads = []
+
+    def _flush_locked(items):
+        nonlocal created_total, duplicate_total, error_total
+        if not items:
+            return
+        try:
+            resp = client._request("POST", register_url, json={"items": items})
+            data = resp.json()
+            created_total += data["summary"].get("created", 0)
+            duplicate_total += data["summary"].get("duplicate", 0)
+            error_total += data["summary"].get("error", 0)
+            for row in data.get("results", []):
+                if row.get("status") == "error":
+                    print(f"  register error [{row.get('index')}]: {row.get('error')}", file=sys.stderr)
+        except Exception as exc:
+            print(f"  bulk-register flush failed for {len(items)} item(s): {exc}", file=sys.stderr)
+            error_total += len(items)
+
+    def _maybe_flush():
+        with pending_lock:
+            if len(pending) >= bulk_size:
+                batch = pending[:bulk_size]
+                del pending[:bulk_size]
+            else:
+                return
+        _flush_locked(batch)
+
+    def _upload_one(fp):
+        size = fp.stat().st_size
+        if size > multipart_threshold:
+            return _multipart_presign_and_put(
+                client, fp, folder=folder, part_size=part_size, concurrency=concurrency
+            )
+        return _presign_and_put(client, fp, folder=folder)
+
+    total = len(file_paths)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {pool.submit(_with_retry, _upload_one, fp): fp for fp in file_paths}
+        for future in as_completed(futures):
+            fp = futures[future]
+            completed += 1
+            try:
+                item = future.result()
+                if tags:
+                    item["tags"] = list(tags)
+                with pending_lock:
+                    pending.append(item)
+                if output_format != "json":
+                    print(f"\r  uploaded {completed}/{total} ({fp.name[:40]:<40})", end="", flush=True)
+                _maybe_flush()
+            except Exception as exc:
+                failed_uploads.append((fp.name, str(exc)))
+                error_total += 1
+                print(f"\n  FAIL [{completed}/{total}]: {fp.name} — {exc}", file=sys.stderr)
+
+    # Drain remaining
+    with pending_lock:
+        leftover, pending[:] = list(pending), []
+    _flush_locked(leftover)
+
+    if output_format == "json":
+        out_json(
+            {
+                "created": created_total,
+                "duplicate": duplicate_total,
+                "error": error_total,
+                "failed_uploads": [{"name": n, "error": e} for n, e in failed_uploads],
+            }
+        )
+    else:
+        print()
+        print(
+            f"Done: {created_total} created, {duplicate_total} duplicate, {error_total} error"
+            + (f" ({len(failed_uploads)} upload failures)" if failed_uploads else "")
+        )
+
+
+def _with_retry(fn, *args, max_attempts=4, base_delay=0.5, **kwargs):
+    """Run ``fn`` with exponential backoff on transient failures.
+
+    Retries on ConnectionError, HTTPError 5xx, and HTTPError 429.
+    Other HTTPErrors (4xx) raise immediately — those are auth/validation
+    bugs we shouldn't burn time on.
+    """
+    import random
+    import time
+
+    from pcxa._http import ConnectionError as _ConnectionError
+    from pcxa._http import HTTPError as _HTTPError
+
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return fn(*args, **kwargs)
+        except _HTTPError as exc:
+            last_exc = exc
+            code = getattr(exc.response, "status_code", 0)
+            if code < 500 and code != 429:
+                raise
+        except (_ConnectionError, OSError) as exc:
+            last_exc = exc
+        delay = base_delay * (2 ** attempt) + random.uniform(0, 0.25)
+        time.sleep(delay)
+    raise last_exc
+
+
+def _presign_and_put(client, fp, *, folder):
+    """Single-PUT path: presign → PUT bytes → return bulk-register item."""
+    import mimetypes
+
+    content_type = mimetypes.guess_type(fp.name)[0] or "application/octet-stream"
+    file_size = fp.stat().st_size
+
+    presign_payload = {
+        "filename": fp.name,
+        "content_type": content_type,
+        "file_size": file_size,
+    }
+    if folder:
+        presign_payload["folder"] = folder
+
+    presign = client._request("POST", client._url("files/presign-upload/"), json=presign_payload).json()
+    upload_url = presign["upload_url"]
+    storage_key = presign.get("storage_key", "")
+
+    # PUT body. Explicit Content-Length defeats any chunked-encoding
+    # fallback in the stdlib http client — R2 rejects chunked single-PUT.
+    with open(fp, "rb") as fh:
+        resp = requests.put(
+            upload_url,
+            data=fh,
+            headers={
+                "Content-Type": content_type,
+                "Content-Length": str(file_size),
+            },
+            timeout=600,
+        )
+        resp.raise_for_status()
+
+    item = {
+        "storage_key": storage_key,
+        "original_filename": fp.name,
+        "content_type": content_type,
+        "file_size": file_size,
+    }
+    if folder:
+        item["folder"] = folder
+    return item
+
+
+def _multipart_presign_and_put(client, fp, *, folder, part_size, concurrency):
+    """Multipart presign path — required for files >~75MB on R2.
+
+    Uses /files/multipart/{initiate,presign-parts,complete} on the
+    backend. Parts upload in parallel (up to ``concurrency``).
+    """
+    import math
+    import mimetypes
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    content_type = mimetypes.guess_type(fp.name)[0] or "application/octet-stream"
+    file_size = fp.stat().st_size
+    total_parts = max(1, math.ceil(file_size / part_size))
+
+    initiate = client._request(
+        "POST",
+        client._url("files/multipart/initiate/"),
+        json={
+            "filename": fp.name,
+            "content_type": content_type,
+            "file_size": file_size,
+            "part_size": part_size,
+        },
+    ).json()
+
+    upload_id = initiate["upload_id"]
+    storage_key = initiate["storage_key"]
+    initial_part_urls = initiate.get("part_urls", {})
+
+    # Backend hands back URLs for the first N parts (default 10); the
+    # rest are presigned on demand via /files/multipart/presign-parts/.
+    have = {int(k): v for k, v in initial_part_urls.items()}
+    missing = [n for n in range(1, total_parts + 1) if n not in have]
+    if missing:
+        remaining = client._request(
+            "POST",
+            client._url("files/multipart/presign-parts/"),
+            json={
+                "storage_key": storage_key,
+                "upload_id": upload_id,
+                "part_numbers": missing,
+            },
+        ).json()
+        for k, v in (remaining.get("part_urls") or {}).items():
+            have[int(k)] = v
+
+    def _put_part(part_number, url):
+        offset = (part_number - 1) * part_size
+        length = min(part_size, file_size - offset)
+        with open(fp, "rb") as fh:
+            fh.seek(offset)
+            body = fh.read(length)
+        resp = requests.put(
+            url,
+            data=body,
+            headers={"Content-Length": str(length)},
+            timeout=600,
+        )
+        resp.raise_for_status()
+        etag = resp.headers.get("etag") or resp.headers.get("ETag") or ""
+        return {"PartNumber": part_number, "ETag": etag.strip('"')}
+
+    parts = []
+    try:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = [pool.submit(_with_retry, _put_part, n, have[n]) for n in range(1, total_parts + 1)]
+            for future in as_completed(futures):
+                parts.append(future.result())
+    except Exception:
+        # Best-effort cleanup so the multipart doesn't linger in R2.
+        try:
+            client._request(
+                "POST",
+                client._url("files/multipart/abort/"),
+                json={"storage_key": storage_key, "upload_id": upload_id},
+            )
+        except Exception:
+            pass
+        raise
+
+    parts.sort(key=lambda p: p["PartNumber"])
+    client._request(
+        "POST",
+        client._url("files/multipart/complete/"),
+        json={"storage_key": storage_key, "upload_id": upload_id, "parts": parts},
+    )
+
+    item = {
+        "storage_key": storage_key,
+        "original_filename": fp.name,
+        "content_type": content_type,
+        "file_size": file_size,
+    }
+    if folder:
+        item["folder"] = folder
+    return item
 
 
 def _upload_via_multipart(client, fp, title, folder, tags, url):

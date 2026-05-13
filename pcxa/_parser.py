@@ -178,6 +178,28 @@ def build_parser():
     p.add_argument("--folder", type=int, help="Target folder ID")
     p.add_argument("--title", help="Override title (single file only; defaults to filename stem)")
     p.add_argument("--tags", help="Tags (comma-sep)")
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=8,
+        help="Parallel uploads for batch operations (default: 8, max: 32). "
+             "Each worker uploads one file end-to-end via presign+PUT; "
+             "metadata is then flushed in batches to /files/bulk-register/.",
+    )
+    p.add_argument(
+        "--multipart-threshold-mb",
+        type=int,
+        default=50,
+        help="Files larger than this (MB) use multipart upload "
+             "(default: 50). Multipart parallelizes part uploads and is "
+             "required for files larger than ~75MB on R2.",
+    )
+    p.add_argument(
+        "--part-size-mb",
+        type=int,
+        default=16,
+        help="Part size for multipart uploads (default: 16MB).",
+    )
 
     p = files_sub.add_parser("upload-version",
                              help="Upload a new version of an existing PCXA file")
