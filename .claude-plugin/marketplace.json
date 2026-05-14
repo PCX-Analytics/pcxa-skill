@@ -13,7 +13,7 @@
       "name": "pcxa",
       "source": "./",
       "description": "Drive the PCXA platform from Claude Code: search and read project files, manage activities, fill out forms, work with resources and timesheets, link entities, and chat with the project's AI assistant.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "author": {
         "name": "PCX Analytics"
       },
@@ -32,5 +32,5 @@
       ]
     }
   ],
-  "version": "0.4.0"
+  "version": "0.4.1"
 }
