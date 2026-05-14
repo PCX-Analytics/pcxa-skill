@@ -113,13 +113,18 @@ pcxa files recent --limit 30
 pcxa files download FILE_ID                              # download to current dir
 pcxa files download FILE_ID -o report.pdf                # custom output path
 pcxa files upload /path/to/file.pdf --folder 5 --title "Report" --tags "final,2026"
-pcxa files upload /path/to/dir/ --folder 5               # bulk upload all files in dir
+pcxa files upload /path/to/dir/ --folder 5               # bulk upload all files in dir (flat)
+pcxa files sync /path/to/tree --folder 5                 # recursive mirror; creates subfolders; idempotent
+pcxa files sync /path/to/tree --folder 5 --manifest .pcxa-sync.json   # persist upload log for fast re-runs
+pcxa files sync /path/to/tree --folder 5 --include "*.pdf" --exclude "draft_*" --concurrency 16
 pcxa files delete 123 124 --yes                          # mark for deletion (adds 'to_delete' tag)
 pcxa files restore 123 124                               # remove 'to_delete' tag (undo)
 pcxa files list --tags to_delete                         # list everything pending deletion
 ```
 
 **Upload storage:** Small files are uploaded through the API. Larger files use a presigned upload flow handled by the CLI and API.
+
+**Bulk tree sync (`files sync`):** Mirrors a local directory tree under a PCXA folder. Walks the tree, creates any missing subfolders to match, and uploads files in parallel via the same presign+PUT/multipart path as `files upload`. Idempotent two ways: it lists each target folder once and skips local files whose name already exists there, and an optional `--manifest <path>` persists `{relative_path → {size, file_id}}` so re-runs skip without hitting the API. Failures (network, register errors) are listed at the end and counted toward `error` rate. Progress is rendered live on stderr: a bar plus files-done, bytes-done/total, throughput, elapsed, ETA, and error count. Filters: `--include` and `--exclude` accept repeatable globs against filenames; dotfiles/dot-dirs are skipped by default (`--include-hidden` opts in).
 
 **Deletion convention:** `pcxa files delete <ids>` marks files for deletion by applying the `to_delete` tag. Use `pcxa files restore <ids>` to undo before cleanup runs. Without `--yes`, `delete` prompts for confirmation.
 

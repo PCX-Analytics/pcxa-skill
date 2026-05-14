@@ -201,6 +201,33 @@ def build_parser():
         help="Part size for multipart uploads (default: 16MB).",
     )
 
+    p = files_sub.add_parser(
+        "sync",
+        help="Recursively mirror a local directory into a PCXA folder "
+             "(idempotent; creates subfolders to match the tree)",
+    )
+    p.add_argument("input_dir", help="Local directory to mirror")
+    p.add_argument("--folder", type=int, default=None,
+                   help="Target PCXA folder ID (omit = project root)")
+    p.add_argument("--manifest",
+                   help="Path to a JSON manifest file used to track uploaded "
+                        "files across runs. Skipped files are recorded so "
+                        "re-runs don't hit the API. Created if missing.")
+    p.add_argument("--include", action="append",
+                   help="Glob to include (repeatable). Default: include all.")
+    p.add_argument("--exclude", action="append",
+                   help="Glob to exclude (repeatable).")
+    p.add_argument("--include-hidden", action="store_true",
+                   help="Include dotfiles and dot-directories (default: skip).")
+    p.add_argument("--tags", help="Tags to apply to every uploaded file (comma-sep)")
+    p.add_argument("--concurrency", type=int, default=8,
+                   help="Parallel uploads (default: 8, max: 32).")
+    p.add_argument("--multipart-threshold-mb", type=int, default=50,
+                   help="Files larger than this (MB) use multipart upload "
+                        "(default: 50).")
+    p.add_argument("--part-size-mb", type=int, default=16,
+                   help="Multipart part size in MB (default: 16, min: 5).")
+
     p = files_sub.add_parser("upload-version",
                              help="Upload a new version of an existing PCXA file")
     p.add_argument("file_id", type=int, help="Existing PCXA file id")
@@ -909,6 +936,7 @@ def build_parser():
     chat_sub.add_parser("models", help="List available AI models")
 
     _propagate_format_to_subparsers(parser)
+    _propagate_dry_run_to_subparsers(parser)
     return parser
 
 
@@ -938,6 +966,25 @@ def _propagate_format_to_subparsers(parser):
                         help="Output format (json|table)",
                     )
                 _propagate_format_to_subparsers(sub)
+
+
+def _propagate_dry_run_to_subparsers(parser):
+    """Same trick as --format: let --dry-run sit after the subcommand."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub in action.choices.values():
+                already = any(
+                    a.dest == "dry_run" and a.option_strings
+                    for a in sub._actions
+                )
+                if not already:
+                    sub.add_argument(
+                        "--dry-run",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="Preview without changes",
+                    )
+                _propagate_dry_run_to_subparsers(sub)
 
 
 __all__ = ["build_parser"]

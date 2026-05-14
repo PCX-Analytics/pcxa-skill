@@ -42,6 +42,7 @@ from pcxa.commands.files import (
     cmd_files_upload,
     cmd_files_upload_version,
 )
+from pcxa.commands.sync import cmd_files_sync
 from pcxa.commands.tags_folders import (
     cmd_categorize,
     cmd_file_update,
@@ -186,6 +187,7 @@ SUB_HANDLERS = {
         "info": cmd_files_info, "stats": cmd_files_stats,
         "aggregate": cmd_files_aggregate, "recent": cmd_files_recent, "download": cmd_files_download,
         "upload": cmd_files_upload, "upload-version": cmd_files_upload_version,
+        "sync": cmd_files_sync,
         "update": cmd_file_update,
         "delete": cmd_files_delete, "restore": cmd_files_restore,
     },
