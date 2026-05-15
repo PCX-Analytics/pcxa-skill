@@ -67,6 +67,12 @@ def cmd_files_sync(client, args):
     part_concurrency = max(1, min(16, args.part_concurrency))
     auto_tune = not args.no_auto_tune
     max_failures = max(0, args.max_failures)
+    # Bulk-presign batches multiple files into one /files/bulk-presign-
+    # upload/ call. Server cap is 500; default 200 mirrors the new
+    # `files upload` flag. If the endpoint isn't deployed yet, the run
+    # auto-falls back to per-file presign on the first 404.
+    batch_size = max(1, min(500, args.batch_size))
+    use_bulk_presign = not args.no_bulk_presign
 
     entries = _collect_files(input_root, includes, excludes, skip_hidden)
     if not entries:
@@ -167,6 +173,14 @@ def cmd_files_sync(client, args):
             f"max-failures={max_failures}.",
             file=sys.stderr,
         )
+    if use_bulk_presign:
+        print(
+            f"Bulk-presign ON: batch={batch_size}. "
+            f"(Falls back to per-file presign automatically on 404.)",
+            file=sys.stderr,
+        )
+    else:
+        print("Bulk-presign OFF: using per-file presign.", file=sys.stderr)
 
     summary = {
         "scanned": total_files,
@@ -211,6 +225,8 @@ def cmd_files_sync(client, args):
         part_size=max(5, args.part_size_mb) * 1024 * 1024,
         pending_bytes=pending_bytes,
         summary=summary,
+        batch_size=batch_size,
+        use_bulk_presign=use_bulk_presign,
     )
 
     if manifest_path:
@@ -512,13 +528,103 @@ def _adaptive_part_size(file_size, requested_part_size):
     return rounded
 
 
+# ───────────────────────── bulk-presign helpers ─────────────────────────
+
+
+def _content_type_for(name):
+    import mimetypes
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
+def _bulk_presign(client, batch_entries):
+    """POST /files/bulk-presign-upload/ for a batch of work-item entries.
+
+    Returns a list aligned with ``batch_entries`` of
+    ``(entry, upload_url, storage_key, error)`` tuples. On success the
+    entry has the URL and key set; on a per-row failure ``error`` is the
+    backend message. Raises ``HTTPError`` for batch-level failures
+    (including 404 when the endpoint isn't deployed) so the caller can
+    decide whether to fall back to legacy per-file presign.
+    """
+    payload_items = []
+    for entry in batch_entries:
+        item = {
+            "filename": entry["name"],
+            "content_type": _content_type_for(entry["name"]),
+            "file_size": entry["size"],
+        }
+        if entry.get("folder_id") is not None:
+            item["folder"] = entry["folder_id"]
+        payload_items.append(item)
+
+    resp = client._request(
+        "POST",
+        client._url("files/bulk-presign-upload/"),
+        json={"items": payload_items},
+        timeout=60,
+    )
+    data = resp.json()
+
+    # Default to per-row "no_response" so a malformed/incomplete reply is
+    # treated as a per-row error rather than silently skipping uploads.
+    out = [(e, None, None, "no_response") for e in batch_entries]
+    for row in data.get("results", []):
+        idx = row.get("index")
+        if idx is None or idx < 0 or idx >= len(batch_entries):
+            continue
+        entry = batch_entries[idx]
+        if row.get("status") == "ok":
+            out[idx] = (
+                entry,
+                row.get("upload_url"),
+                row.get("storage_key", ""),
+                None,
+            )
+        else:
+            out[idx] = (entry, None, None, row.get("error", "unknown"))
+    return out
+
+
+def _upload_one_presigned(entry, upload_url, storage_key):
+    """PUT bytes to a pre-issued presigned URL; return bulk-register item.
+
+    Mirrors the metadata shape returned by :func:`_presign_and_put` so
+    the rest of the pipeline (manifest, bulk-register) doesn't need to
+    care which presign path produced this row.
+    """
+    fp = entry["abs_path"]
+    content_type = _content_type_for(entry["name"])
+    file_size = entry["size"]
+    with open(fp, "rb") as fh:
+        resp = _requests.put(
+            upload_url,
+            data=fh,
+            headers={
+                "Content-Type": content_type,
+                "Content-Length": str(file_size),
+            },
+            timeout=600,
+        )
+        resp.raise_for_status()
+    item = {
+        "storage_key": storage_key,
+        "original_filename": entry["name"],
+        "content_type": content_type,
+        "file_size": file_size,
+    }
+    if entry.get("folder_id") is not None:
+        item["folder"] = entry["folder_id"]
+    return item
+
+
 # ───────────────────────── upload loop ─────────────────────────
 
 
 def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                  root_folder_id, tags, initial_concurrency, min_concurrency,
                  max_concurrency, part_concurrency, auto_tune, max_failures,
-                 multipart_threshold, part_size, pending_bytes, summary):
+                 multipart_threshold, part_size, pending_bytes, summary,
+                 batch_size, use_bulk_presign):
     register_url = client._url("files/bulk-register/")
     pending = []
     pending_lock = threading.Lock()
@@ -657,6 +763,17 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
         finally:
             slots.release()
 
+    def _gated_upload_presigned(entry, upload_url, storage_key):
+        if interrupted.is_set():
+            raise RuntimeError("interrupted")
+        slots.acquire()
+        try:
+            if interrupted.is_set():
+                raise RuntimeError("interrupted")
+            return _upload_one_presigned(entry, upload_url, storage_key)
+        finally:
+            slots.release()
+
     def _maybe_checkpoint_manifest():
         if not manifest_path:
             return
@@ -690,46 +807,112 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
 
     _render(force=True)
 
+    # Mutable container so _process_batch can flip it off after a 404,
+    # and the change persists across batches in the same run.
+    bulk_flag = [bool(use_bulk_presign)]
+
+    def _process_batch(pool, batch):
+        # Step 1: bulk-presign the small files (multipart files always go
+        # through their own per-file presign path; the bulk endpoint
+        # issues single-PUT URLs only).
+        presigned = {}  # entry id() -> (upload_url, storage_key)
+        small = [e for e in batch if e["size"] <= multipart_threshold]
+        if bulk_flag[0] and small:
+            try:
+                results = _bulk_presign(client, small)
+            except _requests.HTTPError as exc:
+                code = getattr(exc.response, "status_code", 0)
+                if code == 404:
+                    bulk_flag[0] = False
+                    _log_autotune(
+                        "[bulk-presign] endpoint not deployed (404) — "
+                        "falling back to per-file presign for the rest "
+                        "of this run"
+                    )
+                else:
+                    _log_autotune(
+                        f"[bulk-presign] HTTP {code}: {exc} — using "
+                        "legacy presign for this batch"
+                    )
+                results = []
+            except Exception as exc:
+                _log_autotune(
+                    f"[bulk-presign] {exc} — using legacy presign "
+                    "for this batch"
+                )
+                results = []
+
+            for entry, url, key, err in results:
+                if err:
+                    summary["error"] += 1
+                    summary["failures"].append({
+                        "name": entry["name"],
+                        "error": f"bulk-presign: {err}",
+                    })
+                    with state_lock:
+                        state["files_done"] += 1
+                    _render()
+                elif url:
+                    presigned[id(entry)] = (url, key)
+
+        # Step 2: submit uploads for the batch.
+        future_to_entry = {}
+        for entry in batch:
+            if interrupted.is_set():
+                break
+            pair = presigned.get(id(entry))
+            if pair is not None:
+                url, key = pair
+                fut = pool.submit(
+                    _with_retry, _gated_upload_presigned, entry, url, key
+                )
+            else:
+                fut = pool.submit(_with_retry, _gated_upload, entry)
+            future_to_entry[fut] = entry
+
+        # Step 3: drain completions for this batch before moving on.
+        for future in _as_completed_with_interrupt(future_to_entry, interrupted):
+            entry = future_to_entry[future]
+            try:
+                item = future.result()
+                item["_sync_rel_path"] = entry["relative_path"]
+                if tags:
+                    item["tags"] = list(tags)
+                with pending_lock:
+                    pending.append(item)
+                with state_lock:
+                    state["files_done"] += 1
+                    state["bytes_done"] += entry["size"]
+                    state["since_manifest_save"] += 1
+            except Exception as exc:
+                summary["error"] += 1
+                summary["failures"].append({
+                    "name": entry["name"], "error": str(exc),
+                })
+                with state_lock:
+                    state["files_done"] += 1
+            _maybe_flush()
+            _render()
+            _maybe_checkpoint_manifest()
+
+            if max_failures and summary["error"] >= max_failures \
+                    and not interrupted.is_set():
+                interrupted.set()
+                summary["aborted_max_failures"] = True
+                _log_autotune(
+                    f"[abort] failure budget exceeded "
+                    f"({summary['error']}/{max_failures}) — stopping."
+                )
+
     try:
         # Pool stays sized at max_concurrency; the semaphore is the real
         # throttle. Excess workers just park on slots.acquire().
         with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
-            future_to_entry = {
-                pool.submit(_with_retry, _gated_upload, e): e
-                for e in work_items
-            }
-            for future in _as_completed_with_interrupt(future_to_entry, interrupted):
-                entry = future_to_entry[future]
-                try:
-                    item = future.result()
-                    item["_sync_rel_path"] = entry["relative_path"]
-                    if tags:
-                        item["tags"] = list(tags)
-                    with pending_lock:
-                        pending.append(item)
-                    with state_lock:
-                        state["files_done"] += 1
-                        state["bytes_done"] += entry["size"]
-                        state["since_manifest_save"] += 1
-                except Exception as exc:
-                    summary["error"] += 1
-                    summary["failures"].append({
-                        "name": entry["name"], "error": str(exc),
-                    })
-                    with state_lock:
-                        state["files_done"] += 1
-                _maybe_flush()
-                _render()
-                _maybe_checkpoint_manifest()
-
-                if max_failures and summary["error"] >= max_failures \
-                        and not interrupted.is_set():
-                    interrupted.set()
-                    summary["aborted_max_failures"] = True
-                    _log_autotune(
-                        f"[abort] failure budget exceeded "
-                        f"({summary['error']}/{max_failures}) — stopping."
-                    )
+            for batch_start in range(0, len(work_items), batch_size):
+                if interrupted.is_set():
+                    break
+                batch = work_items[batch_start:batch_start + batch_size]
+                _process_batch(pool, batch)
     except KeyboardInterrupt:
         interrupted.set()
         _log_autotune("[interrupted] flushing partial progress...")

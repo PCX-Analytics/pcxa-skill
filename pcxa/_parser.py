@@ -246,6 +246,16 @@ def build_parser():
                    help="Multipart part size in MB (default: 16, min: 5). "
                         "Auto-bumped per file if it would exceed R2's "
                         "10000-part cap.")
+    p.add_argument("--batch-size", dest="batch_size", type=int, default=200,
+                   help="Files per /files/bulk-presign-upload/ call "
+                        "(default: 200, server cap: 500). ~Nx fewer "
+                        "presign roundtrips than the legacy per-file path.")
+    p.add_argument("--no-bulk-presign", dest="no_bulk_presign",
+                   action="store_true",
+                   help="Disable the bulk-presign optimization and use "
+                        "the legacy per-file /files/presign-upload/ path. "
+                        "Sync auto-falls back on 404 anyway; this flag "
+                        "lets you force the legacy path explicitly.")
     p.add_argument("--limit", type=int, default=0,
                    help="Stop after queueing N files (after manifest/name "
                         "filtering). Useful for graduated smoke tests. "
