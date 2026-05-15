@@ -5,19 +5,29 @@ tree, creates any missing PCXA subfolders to match the directory shape,
 and uploads each file. Idempotent: skips any local file whose name already
 exists in the corresponding PCXA folder. An optional ``--manifest`` JSON
 sidecar persists upload state across runs so repeats are fast no-ops.
+
+Designed for terabyte-scale workloads: concurrency is gated by a runtime
+resizable semaphore, an AIMD controller continuously adjusts the active
+worker count from observed throughput + error rate (bounded by
+``--min-concurrency`` / ``--max-concurrency``), the manifest is flushed by
+both count and wall time so a crash loses at most ~30s of work, and
+``--max-failures`` short-circuits a misconfigured run before it burns
+hours of bandwidth.
 """
 
 import fnmatch
 import json
+import math
 import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
 from pcxa._output import fmt_size, out_json
+from pcxa._http import requests as _requests
 from pcxa.commands.files import (
     _multipart_presign_and_put,
     _presign_and_put,
@@ -28,6 +38,10 @@ from pcxa.commands.files import (
 MANIFEST_VERSION = 1
 BULK_REGISTER_FLUSH_SIZE = 100
 EXISTING_FILES_PAGE_SIZE = 200
+MANIFEST_CHECKPOINT_SECONDS = 30
+MANIFEST_CHECKPOINT_FILES = 50
+R2_MAX_PARTS = 10000
+R2_PART_HEADROOM = 9500  # leave room so we never round up to 10001
 
 
 def cmd_files_sync(client, args):
@@ -37,12 +51,22 @@ def cmd_files_sync(client, args):
               file=sys.stderr)
         sys.exit(1)
 
-    root_folder_id = args.folder  # may be None == project root
+    root_folder_id = args.folder
     includes = list(args.include or [])
     excludes = list(args.exclude or [])
     skip_hidden = not args.include_hidden
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
     output_format = getattr(args, "format", "json")
+
+    # Concurrency knobs. --concurrency is the *starting* value; --max-
+    # concurrency caps the auto-tuner; --min-concurrency is the floor.
+    max_concurrency = max(1, min(64, args.max_concurrency))
+    min_concurrency = max(1, min(max_concurrency, args.min_concurrency))
+    initial_concurrency = max(min_concurrency,
+                              min(max_concurrency, args.concurrency))
+    part_concurrency = max(1, min(16, args.part_concurrency))
+    auto_tune = not args.no_auto_tune
+    max_failures = max(0, args.max_failures)
 
     entries = _collect_files(input_root, includes, excludes, skip_hidden)
     if not entries:
@@ -60,10 +84,28 @@ def cmd_files_sync(client, args):
     manifest = _load_manifest(manifest_path) if manifest_path else {
         "version": MANIFEST_VERSION, "files": {}
     }
+    if manifest_path and manifest.get("files"):
+        print(
+            f"Resuming from manifest: {len(manifest['files'])} files already recorded.",
+            file=sys.stderr,
+        )
+
+    limit = max(0, getattr(args, "limit", 0))
 
     if args.dry_run:
-        _print_dry_run(entries, root_folder_id, manifest, total_bytes)
+        _print_dry_run(entries, root_folder_id, manifest, total_bytes,
+                       initial_concurrency, max_concurrency, auto_tune, limit)
         return
+
+    # Pre-flight: confirm the target folder actually exists so we don't
+    # discover the typo 4 hours into a TB upload.
+    if root_folder_id is not None:
+        try:
+            client.get(f"folders/{root_folder_id}/")
+        except _requests.HTTPError as exc:
+            print(f"Target folder id={root_folder_id} not accessible: {exc}",
+                  file=sys.stderr)
+            sys.exit(1)
 
     print("Resolving target folders...", file=sys.stderr)
     rel_dirs = sorted({e["relative_dir"] for e in entries},
@@ -86,8 +128,6 @@ def cmd_files_sync(client, args):
             skipped_manifest += 1
             continue
         existing = folder_to_existing.get(folder_id, set()) if folder_id else set()
-        # Backend default-titles uploads to the filename stem; existing rows
-        # uploaded via this same flow will match on stem.
         candidates = {e["name"].lower(), e["stem"].lower()}
         if existing & candidates:
             skipped_api += 1
@@ -100,12 +140,33 @@ def cmd_files_sync(client, args):
             continue
         work_items.append(e)
 
+    capped_by_limit = 0
+    if limit and len(work_items) > limit:
+        capped_by_limit = len(work_items) - limit
+        work_items = work_items[:limit]
+
     pending_bytes = sum(e["size"] for e in work_items)
+    limit_note = f"  (--limit kept first {limit}, deferred {capped_by_limit})" \
+        if capped_by_limit else ""
     print(
         f"To upload: {len(work_items)} files ({fmt_size(pending_bytes)})  "
-        f"Skipped: {skipped_manifest} (manifest), {skipped_api} (name match)",
+        f"Skipped: {skipped_manifest} (manifest), {skipped_api} (name match)"
+        f"{limit_note}",
         file=sys.stderr,
     )
+    if auto_tune:
+        print(
+            f"Auto-tune ON: starting at {initial_concurrency} workers, "
+            f"range [{min_concurrency}, {max_concurrency}], "
+            f"max-failures={max_failures}.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"Auto-tune OFF: fixed at {initial_concurrency} workers, "
+            f"max-failures={max_failures}.",
+            file=sys.stderr,
+        )
 
     summary = {
         "scanned": total_files,
@@ -114,10 +175,13 @@ def cmd_files_sync(client, args):
         "to_upload_bytes": pending_bytes,
         "skipped_manifest": skipped_manifest,
         "skipped_name_match": skipped_api,
+        "deferred_by_limit": capped_by_limit,
         "created": 0,
         "duplicate": 0,
         "error": 0,
         "failures": [],
+        "aborted_max_failures": False,
+        "concurrency_final": initial_concurrency,
     }
 
     if not work_items:
@@ -129,10 +193,6 @@ def cmd_files_sync(client, args):
             print("Nothing to upload.", file=sys.stderr)
         return
 
-    multipart_threshold = args.multipart_threshold_mb * 1024 * 1024
-    part_size = max(5, args.part_size_mb) * 1024 * 1024
-    concurrency = max(1, min(32, args.concurrency))
-
     _run_uploads(
         client=client,
         work_items=work_items,
@@ -141,9 +201,14 @@ def cmd_files_sync(client, args):
         input_root=input_root,
         root_folder_id=root_folder_id,
         tags=tags,
-        concurrency=concurrency,
-        multipart_threshold=multipart_threshold,
-        part_size=part_size,
+        initial_concurrency=initial_concurrency,
+        min_concurrency=min_concurrency,
+        max_concurrency=max_concurrency,
+        part_concurrency=part_concurrency,
+        auto_tune=auto_tune,
+        max_failures=max_failures,
+        multipart_threshold=args.multipart_threshold_mb * 1024 * 1024,
+        part_size=max(5, args.part_size_mb) * 1024 * 1024,
         pending_bytes=pending_bytes,
         summary=summary,
     )
@@ -158,9 +223,15 @@ def cmd_files_sync(client, args):
             f"\nDone: {summary['created']} created, "
             f"{summary['duplicate']} duplicate, "
             f"{summary['error']} error  "
-            f"(skipped: {skipped_manifest} manifest, {skipped_api} name match)",
+            f"(skipped: {skipped_manifest} manifest, {skipped_api} name match)  "
+            f"final concurrency: {summary['concurrency_final']}",
             file=sys.stderr,
         )
+        if summary["aborted_max_failures"]:
+            print(
+                f"  Aborted: failure budget exceeded ({max_failures}).",
+                file=sys.stderr,
+            )
         if summary["failures"]:
             print(f"\nFirst {min(10, len(summary['failures']))} failures:", file=sys.stderr)
             for f in summary["failures"][:10]:
@@ -186,7 +257,7 @@ def _collect_files(input_root, includes, excludes, skip_hidden):
                 print(f"  skip (stat failed): {abs_path} — {exc}", file=sys.stderr)
                 continue
             rel_dir_parts = Path(dirpath).resolve().relative_to(input_root).parts
-            rel_dir = "/".join(rel_dir_parts)  # "" for root
+            rel_dir = "/".join(rel_dir_parts)
             rel_path = f"{rel_dir}/{name}" if rel_dir else name
             entries.append({
                 "abs_path": abs_path,
@@ -203,13 +274,11 @@ def _resolve_or_create_folders(client, rel_dirs, root_folder_id):
     """Map each relative dir (POSIX-style) to a PCXA folder id.
 
     Walks the folder tree segment by segment, reusing existing folders by
-    name and creating any that don't exist. Builds a cache so each segment
-    is only resolved once per run.
+    name and creating any that don't exist. Serial intentionally: parent
+    must exist before children, and parallel POSTs on the same name race
+    into duplicate folders.
     """
     cache = {"": root_folder_id}
-
-    # Pre-populate subfolder maps lazily; ``children_cache[parent_id]`` is a
-    # ``{lowercased_name: id}`` dict, fetched the first time a parent is touched.
     children_cache = {}
 
     def _children_of(parent_id):
@@ -268,12 +337,7 @@ def _resolve_or_create_folders(client, rel_dirs, root_folder_id):
 
 
 def _fetch_existing_names(client, folder_ids):
-    """For each folder id, return the set of names already there.
-
-    Pulls ``files/?folder=X`` paginated. We store both ``title`` and any
-    ``original_filename`` we find (lowercased) so the name collision check
-    in :func:`cmd_files_sync` is forgiving across upload sources.
-    """
+    """For each folder id, return the set of names already there."""
     result = {}
     for fid in folder_ids:
         names = set()
@@ -332,22 +396,49 @@ def _save_manifest(path, manifest, input_root, root_folder_id):
         print(f"  manifest write failed ({path}): {exc}", file=sys.stderr)
 
 
-def _print_dry_run(entries, root_folder_id, manifest, total_bytes):
-    by_dir = {}
-    for e in entries:
-        by_dir.setdefault(e["relative_dir"], []).append(e)
+def _print_dry_run(entries, root_folder_id, manifest, total_bytes,
+                   initial_concurrency, max_concurrency, auto_tune, limit):
+    # Apply manifest filter so the preview matches the real run. Folder
+    # IDs aren't known in dry-run, so we match on (relative_path, size)
+    # only — the real run additionally requires folder_id agreement.
     in_manifest = 0
+    would_upload = []
     for e in entries:
         mf = manifest["files"].get(e["relative_path"])
         if mf and mf.get("size") == e["size"]:
             in_manifest += 1
+            continue
+        would_upload.append(e)
+
+    deferred = 0
+    if limit and len(would_upload) > limit:
+        deferred = len(would_upload) - limit
+        would_upload = would_upload[:limit]
+
+    upload_bytes = sum(e["size"] for e in would_upload)
+
     print(
-        f"Dry run — would mirror {len(entries)} files ({fmt_size(total_bytes)}) "
+        f"Dry run — scanned {len(entries)} files ({fmt_size(total_bytes)}) "
         f"under PCXA folder id={root_folder_id or 'root'}.",
+        file=sys.stderr,
+    )
+    print(
+        f"  would upload: {len(would_upload)} files ({fmt_size(upload_bytes)}).",
+        file=sys.stderr,
+    )
+    print(
+        f"  concurrency: starting {initial_concurrency}, cap {max_concurrency}, "
+        f"auto-tune {'ON' if auto_tune else 'OFF'}.",
         file=sys.stderr,
     )
     if in_manifest:
         print(f"  {in_manifest} already in manifest (would skip).", file=sys.stderr)
+    if deferred:
+        print(f"  --limit deferred {deferred} files to a later run.", file=sys.stderr)
+
+    by_dir = {}
+    for e in would_upload:
+        by_dir.setdefault(e["relative_dir"], []).append(e)
     for rel_dir, files in sorted(by_dir.items()):
         print(f"  {rel_dir or '.'}/  ({len(files)} files)", file=sys.stderr)
         for e in files[:5]:
@@ -356,22 +447,96 @@ def _print_dry_run(entries, root_folder_id, manifest, total_bytes):
             print(f"    ... and {len(files) - 5} more", file=sys.stderr)
 
 
+# ───────────────────────── runtime concurrency ─────────────────────────
+
+
+class AdjustableSemaphore:
+    """Semaphore whose permit count can grow or shrink at runtime.
+
+    Workers ``acquire()`` before doing chargeable work and ``release()``
+    after. ``resize(new_target)`` adjusts available permits up or down;
+    shrinking is lazy — existing holders keep their permit and finish.
+    """
+
+    def __init__(self, initial, minimum=1, maximum=None):
+        self._cond = threading.Condition()
+        self._target = initial
+        self._available = initial
+        self._min = minimum
+        self._max = maximum if maximum is not None else initial * 4
+
+    def acquire(self):
+        with self._cond:
+            while self._available <= 0:
+                self._cond.wait()
+            self._available -= 1
+
+    def release(self):
+        with self._cond:
+            self._available += 1
+            self._cond.notify()
+
+    def resize(self, new_target):
+        with self._cond:
+            new_target = max(self._min, min(self._max, int(new_target)))
+            delta = new_target - self._target
+            self._target = new_target
+            self._available += delta
+            if delta > 0:
+                self._cond.notify(delta)
+            return new_target
+
+    @property
+    def target(self):
+        with self._cond:
+            return self._target
+
+
+def _adaptive_part_size(file_size, requested_part_size):
+    """Bump part_size if needed to stay under R2's 10000-part cap."""
+    if file_size <= 0:
+        return requested_part_size
+    parts = math.ceil(file_size / requested_part_size)
+    if parts <= R2_PART_HEADROOM:
+        return requested_part_size
+    # Round up to next 4 MB so we don't end up with awkward sub-MB sizes.
+    needed = math.ceil(file_size / R2_PART_HEADROOM)
+    rounded = math.ceil(needed / (4 * 1024 * 1024)) * (4 * 1024 * 1024)
+    return rounded
+
+
+# ───────────────────────── upload loop ─────────────────────────
+
+
 def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
-                 root_folder_id, tags, concurrency, multipart_threshold, part_size,
-                 pending_bytes, summary):
+                 root_folder_id, tags, initial_concurrency, min_concurrency,
+                 max_concurrency, part_concurrency, auto_tune, max_failures,
+                 multipart_threshold, part_size, pending_bytes, summary):
     register_url = client._url("files/bulk-register/")
     pending = []
     pending_lock = threading.Lock()
     state_lock = threading.Lock()
     manifest_lock = threading.Lock()
+    log_lock = threading.Lock()
     state = {
         "files_done": 0,
         "bytes_done": 0,
         "last_render": 0.0,
         "started": time.monotonic(),
+        "last_manifest_save": time.monotonic(),
         "since_manifest_save": 0,
+        "autotune_messages": [],
     }
     interrupted = threading.Event()
+    slots = AdjustableSemaphore(
+        initial=initial_concurrency,
+        minimum=min_concurrency,
+        maximum=max_concurrency,
+    )
+
+    def _log_autotune(msg):
+        with log_lock:
+            state["autotune_messages"].append(msg)
 
     def _flush_locked(items):
         if not items:
@@ -383,7 +548,6 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
             summary["created"] += s.get("created", 0)
             summary["duplicate"] += s.get("duplicate", 0)
             summary["error"] += s.get("error", 0)
-            # Map register results back so the manifest gets the file_id.
             results = data.get("results") or []
             for row in results:
                 idx = row.get("index")
@@ -423,10 +587,25 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
             del pending[:BULK_REGISTER_FLUSH_SIZE]
         _flush_locked(batch)
 
+    def _drain_pending_messages():
+        """Emit auto-tune messages above the next progress line."""
+        with log_lock:
+            if not state["autotune_messages"]:
+                return False
+            msgs = list(state["autotune_messages"])
+            state["autotune_messages"].clear()
+        # Clear current progress line, then print messages.
+        sys.stderr.write("\r" + " " * 140 + "\r")
+        for m in msgs:
+            sys.stderr.write(m + "\n")
+        sys.stderr.flush()
+        return True
+
     def _render(force=False):
+        had_msgs = _drain_pending_messages()
         now = time.monotonic()
         with state_lock:
-            if not force and now - state["last_render"] < 0.2:
+            if not force and not had_msgs and now - state["last_render"] < 0.2:
                 return
             state["last_render"] = now
             done = state["files_done"]
@@ -441,7 +620,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
         line = (
             f"\r  {bar} {done:>5}/{total:<5} {pct:5.1f}%  "
             f"{fmt_size(bytes_done)}/{fmt_size(pending_bytes)}  "
-            f"{fmt_size(rate)}/s  "
+            f"{fmt_size(rate)}/s  c={slots.target:<2}  "
             f"elapsed={_fmt_elapsed(elapsed)}  "
             f"eta={_fmt_elapsed(eta) if eta else '--'}  "
             f"err={summary['error']} ({err_rate:.1f}%)"
@@ -453,19 +632,67 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
         fp = entry["abs_path"]
         size = entry["size"]
         if size > multipart_threshold:
+            effective_part_size = _adaptive_part_size(size, part_size)
             return _multipart_presign_and_put(
                 client, fp, folder=entry["folder_id"],
-                part_size=part_size, concurrency=concurrency,
+                part_size=effective_part_size, concurrency=part_concurrency,
             )
         return _presign_and_put(client, fp, folder=entry["folder_id"])
+
+    def _gated_upload(entry):
+        if interrupted.is_set():
+            raise RuntimeError("interrupted")
+        slots.acquire()
+        try:
+            if interrupted.is_set():
+                raise RuntimeError("interrupted")
+            return _upload_one(entry)
+        finally:
+            slots.release()
+
+    def _maybe_checkpoint_manifest():
+        if not manifest_path:
+            return
+        with state_lock:
+            should = (
+                state["since_manifest_save"] >= MANIFEST_CHECKPOINT_FILES
+                or time.monotonic() - state["last_manifest_save"]
+                >= MANIFEST_CHECKPOINT_SECONDS
+            )
+        if not should:
+            return
+        with pending_lock:
+            batch = list(pending)
+            pending[:] = []
+        _flush_locked(batch)
+        _save_manifest(manifest_path, manifest, input_root, root_folder_id)
+        with state_lock:
+            state["since_manifest_save"] = 0
+            state["last_manifest_save"] = time.monotonic()
+
+    # AIMD controller thread.
+    controller_thread = None
+    if auto_tune:
+        controller_thread = threading.Thread(
+            target=_run_controller,
+            args=(slots, state, summary, interrupted,
+                  min_concurrency, max_concurrency, _log_autotune),
+            daemon=True,
+        )
+        controller_thread.start()
 
     _render(force=True)
 
     try:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {pool.submit(_with_retry, _upload_one, e): e for e in work_items}
-            for future in as_completed(futures):
-                entry = futures[future]
+        # Pool stays sized at max_concurrency; the semaphore is the real
+        # throttle. Excess workers just park on slots.acquire().
+        with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+            future_to_entry = {
+                pool.submit(_with_retry, _gated_upload, e): e
+                for e in work_items
+            }
+            for future in _as_completed_with_interrupt(future_to_entry, interrupted):
+                entry = future_to_entry[future]
                 try:
                     item = future.result()
                     item["_sync_rel_path"] = entry["relative_path"]
@@ -486,30 +713,130 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                         state["files_done"] += 1
                 _maybe_flush()
                 _render()
-                # Periodic manifest snapshot so a crash doesn't lose progress.
-                if manifest_path and state["since_manifest_save"] >= 50:
-                    # Drain pending so manifest reflects registered rows only.
-                    with pending_lock:
-                        batch = list(pending)
-                        pending[:] = []
-                    _flush_locked(batch)
-                    _save_manifest(manifest_path, manifest, input_root, root_folder_id)
-                    with state_lock:
-                        state["since_manifest_save"] = 0
+                _maybe_checkpoint_manifest()
+
+                if max_failures and summary["error"] >= max_failures \
+                        and not interrupted.is_set():
+                    interrupted.set()
+                    summary["aborted_max_failures"] = True
+                    _log_autotune(
+                        f"[abort] failure budget exceeded "
+                        f"({summary['error']}/{max_failures}) — stopping."
+                    )
     except KeyboardInterrupt:
         interrupted.set()
-        sys.stderr.write("\n  interrupted — flushing partial progress...\n")
+        _log_autotune("[interrupted] flushing partial progress...")
 
-    # Drain remaining items.
+    interrupted.set()  # signal controller to stop
+    if controller_thread:
+        controller_thread.join(timeout=2.0)
+
     with pending_lock:
         leftover, pending[:] = list(pending), []
     _flush_locked(leftover)
+    summary["concurrency_final"] = slots.target
     _render(force=True)
     sys.stderr.write("\n")
     sys.stderr.flush()
 
-    if interrupted.is_set():
-        sys.exit(130)
+
+def _as_completed_with_interrupt(future_to_entry, interrupted):
+    """Yield futures as they complete; bail out promptly on interrupt.
+
+    Wrapping ``as_completed`` so the loop can short-circuit when the
+    failure-budget circuit-breaker or Ctrl-C fires, instead of waiting
+    for every parked worker to drain naturally.
+    """
+    from concurrent.futures import as_completed
+    it = as_completed(future_to_entry)
+    while True:
+        if interrupted.is_set():
+            return
+        try:
+            yield next(it)
+        except StopIteration:
+            return
+
+
+# ───────────────────────── auto-tune controller ─────────────────────────
+
+
+def _run_controller(slots, state, summary, interrupted, min_c, max_c, log,
+                    window_seconds=10.0, cooldown_seconds=30.0):
+    """AIMD controller. Samples throughput + error count every window.
+
+    Decisions per window:
+      • errors >= 3 OR err_rate > 10%  → multiplicative decrease (halve),
+        followed by a cooldown to avoid thrashing.
+      • throughput growing AND below cap → additive increase (+max(1, c/4)).
+      • throughput falling materially AND above floor → step down by 1.
+      • otherwise hold.
+    """
+    last = {
+        "bytes": 0,
+        "files": 0,
+        "errors": 0,
+        "throughput": 0.0,
+    }
+    cooldown_until = 0.0
+    # Wait one window before the first decision so we have a baseline.
+    interrupted.wait(window_seconds)
+
+    while not interrupted.is_set():
+        bytes_now = state["bytes_done"]
+        files_now = state["files_done"]
+        errors_now = summary["error"]
+        win_bytes = bytes_now - last["bytes"]
+        win_files = files_now - last["files"]
+        win_errors = errors_now - last["errors"]
+        win_throughput = win_bytes / window_seconds
+        win_err_rate = (win_errors / win_files) if win_files else 0.0
+        now = time.monotonic()
+        current = slots.target
+
+        prev_throughput = last["throughput"]
+
+        if win_errors >= 3 or win_err_rate > 0.10:
+            new_c = max(min_c, current // 2)
+            if new_c < current:
+                slots.resize(new_c)
+                cooldown_until = now + cooldown_seconds
+                log(
+                    f"[auto-tune] {win_errors} errors in {int(window_seconds)}s "
+                    f"({win_err_rate*100:.0f}%) — concurrency {current} -> {new_c}"
+                )
+        elif now < cooldown_until:
+            pass
+        elif win_files == 0:
+            # No completions this window: maybe huge files in flight.
+            # Hold steady so we don't keep nudging while waiting.
+            pass
+        elif current < max_c and (
+            prev_throughput == 0
+            or win_throughput >= prev_throughput * 1.05
+        ):
+            step = max(1, current // 4)
+            new_c = min(max_c, current + step)
+            if new_c > current:
+                slots.resize(new_c)
+                log(
+                    f"[auto-tune] throughput {_fmt_mbps(prev_throughput)} -> "
+                    f"{_fmt_mbps(win_throughput)} — concurrency {current} -> {new_c}"
+                )
+        elif current > min_c and prev_throughput > 0 \
+                and win_throughput < prev_throughput * 0.85:
+            new_c = max(min_c, current - 1)
+            slots.resize(new_c)
+            log(
+                f"[auto-tune] throughput {_fmt_mbps(prev_throughput)} -> "
+                f"{_fmt_mbps(win_throughput)} — concurrency {current} -> {new_c}"
+            )
+
+        last["bytes"] = bytes_now
+        last["files"] = files_now
+        last["errors"] = errors_now
+        last["throughput"] = win_throughput
+        interrupted.wait(window_seconds)
 
 
 def _bar(pct, width=20):
@@ -527,6 +854,10 @@ def _fmt_elapsed(seconds):
     if m:
         return f"{m:d}m{s:02d}s"
     return f"{s:d}s"
+
+
+def _fmt_mbps(bps):
+    return f"{bps / (1024 * 1024):.1f}MB/s"
 
 
 __all__ = ["cmd_files_sync"]

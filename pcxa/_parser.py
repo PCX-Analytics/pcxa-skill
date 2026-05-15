@@ -221,12 +221,35 @@ def build_parser():
                    help="Include dotfiles and dot-directories (default: skip).")
     p.add_argument("--tags", help="Tags to apply to every uploaded file (comma-sep)")
     p.add_argument("--concurrency", type=int, default=8,
-                   help="Parallel uploads (default: 8, max: 32).")
+                   help="Starting parallel uploads (default: 8). The "
+                        "auto-tuner adjusts up to --max-concurrency.")
+    p.add_argument("--max-concurrency", dest="max_concurrency", type=int, default=32,
+                   help="Hard cap on concurrent uploads (default: 32, max: 64). "
+                        "The auto-tuner will never exceed this.")
+    p.add_argument("--min-concurrency", dest="min_concurrency", type=int, default=1,
+                   help="Floor for concurrent uploads (default: 1). The "
+                        "auto-tuner will not drop below this even on errors.")
+    p.add_argument("--no-auto-tune", dest="no_auto_tune", action="store_true",
+                   help="Disable the AIMD auto-tuner. Concurrency stays "
+                        "fixed at --concurrency for the whole run.")
+    p.add_argument("--max-failures", dest="max_failures", type=int, default=100,
+                   help="Abort the run if cumulative errors reach this count "
+                        "(default: 100). Set 0 to disable the circuit breaker.")
+    p.add_argument("--part-concurrency", dest="part_concurrency", type=int, default=4,
+                   help="Parallel parts per multipart upload (default: 4, "
+                        "max: 16). Decoupled from --concurrency to keep "
+                        "memory bounded when many big files are in flight.")
     p.add_argument("--multipart-threshold-mb", type=int, default=50,
                    help="Files larger than this (MB) use multipart upload "
                         "(default: 50).")
     p.add_argument("--part-size-mb", type=int, default=16,
-                   help="Multipart part size in MB (default: 16, min: 5).")
+                   help="Multipart part size in MB (default: 16, min: 5). "
+                        "Auto-bumped per file if it would exceed R2's "
+                        "10000-part cap.")
+    p.add_argument("--limit", type=int, default=0,
+                   help="Stop after queueing N files (after manifest/name "
+                        "filtering). Useful for graduated smoke tests. "
+                        "0 = no limit (default).")
 
     p = files_sub.add_parser("upload-version",
                              help="Upload a new version of an existing PCXA file")
