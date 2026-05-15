@@ -286,8 +286,15 @@ def _resolve_or_create_folders(client, rel_dirs, root_folder_id):
             return children_cache[parent_id]
         m = {}
         if parent_id is None:
-            tree = client.get("folders/folder_tree/")
-            roots = tree if isinstance(tree, list) else tree.get("results", [])
+            # `folders/folder_tree/` 404s on projects with no folders yet.
+            # Fall back to the flat `folders/` listing in that case (same
+            # pattern `cmd_folders_tree` uses).
+            try:
+                tree = client.get("folders/folder_tree/")
+                roots = tree if isinstance(tree, list) else tree.get("results", [])
+            except _requests.HTTPError:
+                all_folders = client.get_all_pages("folders/")
+                roots = [f for f in all_folders if f.get("parent") is None]
             for node in roots:
                 m[node["name"].lower()] = node["id"]
         else:
