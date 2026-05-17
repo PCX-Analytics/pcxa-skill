@@ -10,8 +10,16 @@ credential file exists.
 """
 
 import json
+import os
 import sys
+import threading
 from pathlib import Path
+
+
+# Cross-thread serialization for credential writes. A long-running sync can
+# trigger many parallel JWT refreshes — without this, two threads could race
+# to write credentials.json and one would truncate the other's update.
+_SAVE_LOCK = threading.Lock()
 
 
 GLOBAL_CONFIG_DIR = Path.home() / ".pcxa"
@@ -164,13 +172,24 @@ def load_config():
 
 
 def save_config(config):
+    """Atomically persist the credentials config.
+
+    Writes to a sibling tmp file then ``os.replace()`` so a crash or
+    concurrent reader never sees a half-written credentials.json. The
+    in-process lock prevents two threads from interleaving their writes,
+    which can otherwise lose a freshly rotated refresh_token under sync's
+    parallel workers (see issue #550).
+    """
     path = get_config_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, indent=2))
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass  # Windows NTFS doesn't support Unix permissions
+    with _SAVE_LOCK:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(config, indent=2))
+        try:
+            tmp.chmod(0o600)
+        except OSError:
+            pass  # Windows NTFS doesn't support Unix permissions
+        os.replace(tmp, path)
 
 
 def find_local_config():

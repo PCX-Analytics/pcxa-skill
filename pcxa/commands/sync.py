@@ -160,6 +160,8 @@ def cmd_files_sync(client, args):
         f"{limit_note}",
         file=sys.stderr,
     )
+
+    _warn_if_token_short(client)
     if auto_tune:
         print(
             f"Auto-tune ON: starting at {initial_concurrency} workers, "
@@ -1027,6 +1029,30 @@ def _run_controller(slots, state, summary, interrupted, min_c, max_c, log,
         last["errors"] = errors_now
         last["throughput"] = win_throughput
         interrupted.wait(window_seconds)
+
+
+def _warn_if_token_short(client, threshold_seconds=600):
+    """Surface a one-line warning if the access_token won't outlive a typical
+    sync. The client refreshes proactively now, but a heads-up here lets the
+    user run ``pcxa login`` *before* a TB-scale run instead of relying on
+    mid-run refresh to keep working.
+    """
+    remaining = getattr(client, "access_token_expires_in", lambda: None)()
+    if remaining is None or remaining > threshold_seconds:
+        return
+    if remaining <= 0:
+        print(
+            "Warning: access_token already expired — will refresh on first request. "
+            "If refresh fails, run `pcxa login` and re-run.",
+            file=sys.stderr,
+        )
+    else:
+        mins = max(1, int(remaining // 60))
+        print(
+            f"Warning: access_token expires in ~{mins} min. Auto-refresh will "
+            f"kick in, but for long syncs consider running `pcxa login` first.",
+            file=sys.stderr,
+        )
 
 
 def _bar(pct, width=20):

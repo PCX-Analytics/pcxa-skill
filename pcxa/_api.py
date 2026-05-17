@@ -1,10 +1,61 @@
-"""APIClient: HTTP wrapper for the pcxa REST API with JWT auth + auto-refresh."""
+"""APIClient: HTTP wrapper for the pcxa REST API with JWT auth + auto-refresh.
 
+The refresh path is thread-safe and tolerates many concurrent workers. Three
+mechanisms cooperate to prevent the thundering-herd race where N workers
+simultaneously hit a 401 and race on the rotating refresh endpoint, ending
+with N-1 of them blacklisting their refresh_token (issue #550):
+
+  1. **Proactive refresh** — before each request we decode the access_token's
+     ``exp`` claim and refresh early if it's within ``REFRESH_LEEWAY_SECONDS``
+     of expiring. This eliminates the burst of simultaneous 401s entirely.
+  2. **Single-flight lock** — actual refresh is serialized behind
+     ``_refresh_lock``. Workers that arrive while a refresh is in flight wait
+     for it and reuse the freshly written token instead of double-rotating.
+  3. **Reload-on-blacklist** — if the refresh endpoint reports our refresh
+     token is blacklisted (another process beat us), we re-read
+     ``credentials.json`` from disk and retry with whatever was just written.
+"""
+
+import base64
+import json
 import sys
+import threading
+import time
 from urllib.parse import parse_qs, quote, urlparse
 
-from pcxa._config import save_config
+from pcxa._config import load_config, save_config
 from pcxa._http import requests
+
+
+# Refresh the access_token when its remaining lifetime drops below this many
+# seconds. Tokens typically live ~15-90 min, so a 5-min leeway gives plenty of
+# headroom even under clock skew without burning refreshes for short scripts.
+REFRESH_LEEWAY_SECONDS = 300
+
+# Cooldown after a successful refresh. Concurrent workers that enter the lock
+# within this window assume the already-written token is fresh and skip the
+# extra network round-trip.
+REFRESH_REUSE_SECONDS = 10
+
+
+def _decode_jwt_exp(token):
+    """Return the ``exp`` claim (epoch seconds) from a JWT, or None.
+
+    Doesn't verify the signature — the server does that on every request.
+    Tolerant of malformed tokens: returns None instead of raising so callers
+    can fall back to reactive (401-driven) refresh.
+    """
+    if not token or not isinstance(token, str):
+        return None
+    try:
+        payload_b64 = token.split(".")[1]
+        # JWT uses unpadded base64url; pad back to a multiple of 4.
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64.encode("ascii")))
+        exp = claims.get("exp")
+        return float(exp) if exp is not None else None
+    except Exception:
+        return None
 
 
 class APIClient:
@@ -19,6 +70,10 @@ class APIClient:
         self.project_id = profile.get("project")
         self.session = requests.Session()
         self.session.headers["Accept"] = "application/json"
+        # Serializes concurrent refresh attempts so multiple workers don't
+        # race the rotating endpoint and blacklist each other's tokens.
+        self._refresh_lock = threading.Lock()
+        self._last_refresh_at = 0.0
         self._set_auth()
 
     def _set_auth(self):
@@ -34,17 +89,64 @@ class APIClient:
             print(f"Unsupported auth mode '{auth_mode}'. Run: pcxa login", file=sys.stderr)
             sys.exit(1)
 
-    def _refresh_token(self):
-        refresh = self.profile.get("refresh_token")
-        if not refresh:
-            return False
+    def access_token_expires_in(self):
+        """Seconds until the cached access_token expires, or None if unknown."""
+        exp = _decode_jwt_exp(self.profile.get("access_token"))
+        if exp is None:
+            return None
+        return exp - time.time()
+
+    def _reload_credentials_from_disk(self):
+        """Re-read credentials.json so we pick up a token rotated by another
+        process. Mutates ``self.profile`` and re-applies the Authorization
+        header. No-op (returns False) if the file no longer has our profile.
+        """
         try:
-            resp = requests.post(
-                f"{self.base_url}/api/accounts/token/refresh/",
-                json={"refresh": refresh},
-                headers={"Accept": "application/json"},
-                timeout=10,
-            )
+            fresh_config = load_config()
+        except Exception:
+            return False
+        fresh_profile = (fresh_config.get("profiles") or {}).get(self.profile_name)
+        if not isinstance(fresh_profile, dict) or not fresh_profile.get("access_token"):
+            return False
+        for key in ("access_token", "refresh_token"):
+            if fresh_profile.get(key):
+                self.profile[key] = fresh_profile[key]
+        self.config = fresh_config
+        self.session.headers["Authorization"] = f"Bearer {self.profile['access_token']}"
+        return True
+
+    def _refresh_token(self):
+        """Single-flight refresh. Safe under concurrent callers.
+
+        The first caller into the lock performs the network refresh and
+        persists the new tokens. Concurrent callers that arrive within
+        ``REFRESH_REUSE_SECONDS`` see the cached timestamp and reuse the
+        already-rotated token without a second network call — this is what
+        prevents the thundering-herd blacklist race documented in issue #550.
+
+        If the backend reports the refresh_token is blacklisted (another
+        *process* — not just another thread — has already rotated it), reload
+        credentials.json from disk and treat that as success.
+        """
+        if not self.profile.get("refresh_token"):
+            return False
+        with self._refresh_lock:
+            # Fast path: another thread refreshed moments ago. The Authorization
+            # header was already updated by that thread; just signal success.
+            if time.time() - self._last_refresh_at < REFRESH_REUSE_SECONDS:
+                return True
+            refresh = self.profile.get("refresh_token")
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/api/accounts/token/refresh/",
+                    json={"refresh": refresh},
+                    headers={"Accept": "application/json"},
+                    timeout=10,
+                )
+            except Exception as e:
+                print(f"Token refresh error: {e}", file=sys.stderr)
+                return False
+
             if resp.status_code == 200:
                 data = resp.json()
                 self.profile["access_token"] = data["access"]
@@ -53,12 +155,41 @@ class APIClient:
                 self.config["profiles"][self.profile_name] = self.profile
                 save_config(self.config)
                 self.session.headers["Authorization"] = f"Bearer {data['access']}"
+                self._last_refresh_at = time.time()
                 return True
-            else:
-                print(f"Token refresh failed ({resp.status_code}). Run: pcxa setup -u YOUR_EMAIL", file=sys.stderr)
-        except Exception as e:
-            print(f"Token refresh error: {e}", file=sys.stderr)
-        return False
+
+            # Blacklisted refresh_token usually means a sibling process won the
+            # rotation race. Re-read credentials.json — if a fresh token is
+            # waiting on disk, adopt it instead of failing the run.
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            if resp.status_code in (400, 401) and body.get("code") == "token_not_valid":
+                if self._reload_credentials_from_disk():
+                    self._last_refresh_at = time.time()
+                    return True
+
+            print(
+                f"Token refresh failed ({resp.status_code}). Run: pcxa setup -u YOUR_EMAIL",
+                file=sys.stderr,
+            )
+            return False
+
+    def _maybe_proactive_refresh(self):
+        """Refresh if the access_token is about to expire.
+
+        Cheap on the hot path: a base64 decode + a clock read. The network
+        refresh only happens when ``exp`` is within ``REFRESH_LEEWAY_SECONDS``,
+        and that call is itself gated by the single-flight lock.
+        """
+        if self.profile.get("auth", "jwt") != "jwt":
+            return
+        remaining = self.access_token_expires_in()
+        if remaining is None:
+            return  # opaque/unparseable token — fall back to reactive refresh
+        if remaining < REFRESH_LEEWAY_SECONDS:
+            self._refresh_token()
 
     def _url(self, path, project_scoped=True):
         if project_scoped:
@@ -70,6 +201,7 @@ class APIClient:
 
     def _request(self, method, url, **kwargs):
         kwargs.setdefault("timeout", 30)
+        self._maybe_proactive_refresh()
         resp = self.session.request(method, url, **kwargs)
         if resp.status_code in (401, 403) and self.profile.get("auth") == "jwt":
             try:
