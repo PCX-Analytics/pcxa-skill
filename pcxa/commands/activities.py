@@ -240,7 +240,7 @@ def cmd_activities_delete(client, args):
         client.post(f"activities/{args.activity_ids[0]}/soft_delete/")
         print(f"Deleted activity {args.activity_ids[0]}")
     else:
-        data = client.post("activities/bulk_delete/", {"activity_ids": args.activity_ids})
+        data = client.bulk_call("activities/bulk_delete/", "activity_ids", args.activity_ids)
         if args.format == "json":
             out_json(data)
         else:
@@ -262,7 +262,8 @@ def cmd_activities_bulk_update(client, args):
     if args.dry_run:
         print(f"Would BULK UPDATE {len(args.activity_ids)} activities: {updates}")
         return
-    data = client.post("activities/bulk_update/", {"activity_ids": args.activity_ids, "updates": updates})
+    data = client.bulk_call("activities/bulk_update/", "activity_ids", args.activity_ids,
+                            {"updates": updates})
     if args.format == "json":
         out_json(data)
     else:

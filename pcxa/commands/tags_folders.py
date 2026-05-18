@@ -35,7 +35,8 @@ def cmd_tags_add(client, args):
     if args.dry_run:
         print(f"Would ADD tags {tags} to files {args.file_ids}")
         return
-    data = client.post("files/bulk_update/", {"file_ids": args.file_ids, "tags": tags, "tag_mode": "add"})
+    data = client.bulk_call("files/bulk_update/", "file_ids", args.file_ids,
+                            {"tags": tags, "tag_mode": "add"})
     if args.format == "json":
         out_json(data)
     else:
@@ -48,7 +49,8 @@ def cmd_tags_remove(client, args):
     if args.dry_run:
         print(f"Would REMOVE tags {tags} from files {args.file_ids}")
         return
-    data = client.post("files/bulk_update/", {"file_ids": args.file_ids, "tags": tags, "tag_mode": "remove"})
+    data = client.bulk_call("files/bulk_update/", "file_ids", args.file_ids,
+                            {"tags": tags, "tag_mode": "remove"})
     if args.format == "json":
         out_json(data)
     else:
@@ -61,7 +63,8 @@ def cmd_tags_set(client, args):
     if args.dry_run:
         print(f"Would SET tags to {tags} on files {args.file_ids}")
         return
-    data = client.post("files/bulk_update/", {"file_ids": args.file_ids, "tags": tags, "tag_mode": "set"})
+    data = client.bulk_call("files/bulk_update/", "file_ids", args.file_ids,
+                            {"tags": tags, "tag_mode": "set"})
     if args.format == "json":
         out_json(data)
     else:
@@ -253,7 +256,8 @@ def cmd_move(client, args):
         target = f"folder {args.folder}" if args.folder else "root"
         print(f"Would MOVE {len(args.file_ids)} files to {target}")
         return
-    data = client.post("files/bulk_move/", {"file_ids": args.file_ids, "folder_id": args.folder})
+    data = client.bulk_call("files/bulk_move/", "file_ids", args.file_ids,
+                            {"folder_id": args.folder})
     if args.format == "json":
         out_json(data)
     else:
@@ -265,7 +269,8 @@ def cmd_categorize(client, args):
     if args.dry_run:
         print(f"Would SET category '{args.category}' on {len(args.file_ids)} files")
         return
-    data = client.post("files/bulk_update/", {"file_ids": args.file_ids, "category": args.category})
+    data = client.bulk_call("files/bulk_update/", "file_ids", args.file_ids,
+                            {"category": args.category})
     if args.format == "json":
         out_json(data)
     else:
@@ -319,8 +324,8 @@ def cmd_files_delete(client, args):
         if input().strip().lower() != "y":
             print("Aborted.")
             return
-    data = client.post("files/bulk_update/",
-                       {"file_ids": file_ids, "tags": [DELETION_TAG], "tag_mode": "add"})
+    data = client.bulk_call("files/bulk_update/", "file_ids", file_ids,
+                            {"tags": [DELETION_TAG], "tag_mode": "add"})
     if args.format == "json":
         out_json(data)
     else:
@@ -336,10 +341,66 @@ def cmd_files_restore(client, args):
     if args.dry_run:
         print(f"Would remove '{DELETION_TAG}' tag from {len(file_ids)} files")
         return
-    data = client.post("files/bulk_update/",
-                       {"file_ids": file_ids, "tags": [DELETION_TAG], "tag_mode": "remove"})
+    data = client.bulk_call("files/bulk_update/", "file_ids", file_ids,
+                            {"tags": [DELETION_TAG], "tag_mode": "remove"})
     if args.format == "json":
         out_json(data)
     else:
         n = data.get("success_count", 0)
         print(f"Removed '{DELETION_TAG}' tag from {n} files.")
+
+
+def cmd_files_purge(client, args):
+    """Hard-delete files via ``files/bulk_delete/``, chunked.
+
+    Distinct from ``files delete``, which is a soft-delete (adds the
+    ``to_delete`` tag). ``purge`` calls the real DELETE endpoint and is
+    irreversible. Routes through ``APIClient.bulk_call`` so JWT auto-refresh
+    works across long-running jobs (issue #562).
+    """
+    ids = list(args.file_ids or [])
+    if args.ids_file:
+        text = sys.stdin.read() if args.ids_file == "-" else open(args.ids_file).read()
+        for tok in text.replace(",", " ").split():
+            tok = tok.strip()
+            if tok:
+                ids.append(int(tok))
+    # Dedupe preserving order.
+    seen = set()
+    ids = [i for i in ids if not (i in seen or seen.add(i))]
+    if not ids:
+        print("No file ids provided. Use positional args or --ids-file.", file=sys.stderr)
+        sys.exit(1)
+    chunk = max(1, args.chunk)
+    total = len(ids)
+    if args.dry_run:
+        print(f"Would PURGE {total} files in {(total + chunk - 1) // chunk} chunks of {chunk}")
+        print(f"First 5: {ids[:5]}")
+        return
+    if not args.yes:
+        prompt = (f"Type {total} to confirm PURGE of {total} files: "
+                  if total >= 1000 else f"PURGE {total} files (irreversible)? [y/N] ")
+        print(prompt, end="", flush=True)
+        ans = input().strip()
+        ok = ans == str(total) if total >= 1000 else ans.lower() == "y"
+        if not ok:
+            print("Aborted.")
+            return
+
+    def _progress(start, size, tot, data):
+        ok = data.get("success_count", 0)
+        err = data.get("error_count", 0)
+        print(f"  {start + size}/{tot}  ok={ok} err={err}", file=sys.stderr)
+
+    data = client.bulk_call(
+        "files/bulk_delete/", "file_ids", ids,
+        chunk=chunk, method="DELETE",
+        on_chunk=None if args.format == "json" else _progress,
+    )
+    if args.format == "json":
+        out_json(data)
+    else:
+        print(f"\nPurged {data['success_count']} files "
+              f"({data['error_count']} errors) in {data['chunks']} chunks.")
+        if data["errors"]:
+            print(f"First 3 errors: {data['errors'][:3]}", file=sys.stderr)

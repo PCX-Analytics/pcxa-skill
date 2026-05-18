@@ -47,6 +47,7 @@ from pcxa.commands.tags_folders import (
     cmd_categorize,
     cmd_file_update,
     cmd_files_delete,
+    cmd_files_purge,
     cmd_files_restore,
     cmd_folders_contents,
     cmd_folders_create,
@@ -189,7 +190,7 @@ SUB_HANDLERS = {
         "upload": cmd_files_upload, "upload-version": cmd_files_upload_version,
         "sync": cmd_files_sync,
         "update": cmd_file_update,
-        "delete": cmd_files_delete, "restore": cmd_files_restore,
+        "delete": cmd_files_delete, "restore": cmd_files_restore, "purge": cmd_files_purge,
     },
     "tags": {"list": cmd_tags_list, "add": cmd_tags_add, "remove": cmd_tags_remove, "set": cmd_tags_set},
     "folders": {

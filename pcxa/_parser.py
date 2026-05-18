@@ -293,6 +293,17 @@ def build_parser():
                              help=f"Remove '{DELETION_TAG}' tag from files (undo deletion mark)")
     p.add_argument("file_ids", nargs="+", type=int)
 
+    p = files_sub.add_parser("purge",
+                             help="Hard-delete files (irreversible). Chunks via bulk_delete; "
+                                  "use this instead of ad-hoc c.session.delete scripts.")
+    p.add_argument("file_ids", nargs="*", type=int,
+                   help="File ids. May also be supplied via --ids-file.")
+    p.add_argument("--ids-file",
+                   help="Read ids from file (whitespace/comma-separated). Use '-' for stdin.")
+    p.add_argument("--chunk", type=int, default=500,
+                   help="Chunk size for bulk_delete (default 500).")
+    p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
+
     # ── tags ──
     tags_p = sub.add_parser("tags", help="Tag management")
     tags_sub = tags_p.add_subparsers(dest="tags_command")

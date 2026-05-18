@@ -236,6 +236,40 @@ class APIClient:
     def get_raw(self, url, params=None):
         return self._request("GET", url, params=params).json()
 
+    def bulk_call(self, path, ids_key, ids, base_payload=None,
+                  chunk=500, method="POST", project_scoped=True, on_chunk=None):
+        """Call a bulk endpoint in chunks, aggregating ``success_count``,
+        ``error_count``, and ``errors`` across chunks.
+
+        Always routes through ``_request`` so long-running jobs get JWT
+        auto-refresh — use this instead of ``c.session.*`` for any bulk
+        operation that may exceed the access-token TTL (issue #562).
+
+        ``on_chunk(start_index, batch_size, total, response_data)`` fires
+        after each chunk, useful for progress output.
+        """
+        ids = list(ids)
+        base = dict(base_payload or {})
+        url = self._url(path, project_scoped=project_scoped)
+        agg = {"success_count": 0, "error_count": 0, "errors": [], "chunks": 0}
+        for i in range(0, len(ids), chunk):
+            batch = ids[i:i + chunk]
+            payload = dict(base, **{ids_key: batch})
+            resp = self._request(method, url, json=payload)
+            try:
+                data = {} if resp.status_code == 204 else resp.json()
+            except Exception:
+                data = {}
+            agg["success_count"] += data.get("success_count", 0)
+            agg["error_count"] += data.get("error_count", 0)
+            errs = data.get("errors")
+            if errs:
+                agg["errors"].extend(errs)
+            agg["chunks"] += 1
+            if on_chunk is not None:
+                on_chunk(i, len(batch), len(ids), data)
+        return agg
+
     @staticmethod
     def paginate_params(limit, offset=0):
         """Convert limit/offset to page_size/page for DRF PageNumberPagination."""

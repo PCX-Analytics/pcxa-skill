@@ -24,6 +24,13 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
 [project.urls]
 Homepage = "https://github.com/PCX-Analytics/pcxa-skill"
 Repository = "https://github.com/PCX-Analytics/pcxa-skill"
