@@ -41,6 +41,8 @@ EXISTING_FILES_PAGE_SIZE = 200
 EXISTING_FILES_TIMEOUT = 180
 EXISTING_FILES_RETRIES = 3
 EXISTING_FILES_WORKERS = 6
+BULK_REGISTER_TIMEOUT = 180
+BULK_REGISTER_RETRIES = 3
 MANIFEST_CHECKPOINT_SECONDS = 30
 MANIFEST_CHECKPOINT_FILES = 50
 R2_MAX_PARTS = 10000
@@ -733,8 +735,41 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     def _flush_locked(items):
         if not items:
             return
+        # bulk-register is a heavy multi-row DB write — the default 30s
+        # timeout is far too short for batches of 50+ files, and a
+        # ConnectionError here means the R2 PUTs already succeeded but
+        # the DB rows never landed. Retry on transient errors before
+        # giving up and marking the whole batch failed (issue #554).
+        resp = None
+        for attempt in range(BULK_REGISTER_RETRIES):
+            try:
+                resp = client._request(
+                    "POST", register_url,
+                    json={"items": items},
+                    timeout=BULK_REGISTER_TIMEOUT,
+                )
+                break
+            except _requests.ConnectionError as exc:
+                if attempt == BULK_REGISTER_RETRIES - 1:
+                    summary["error"] += len(items)
+                    for it in items:
+                        summary["failures"].append({
+                            "name": it.get("original_filename", "?"),
+                            "error": f"bulk-register: {exc}",
+                        })
+                    return
+                time.sleep(2 ** attempt)
+            except Exception as exc:
+                summary["error"] += len(items)
+                for it in items:
+                    summary["failures"].append({
+                        "name": it.get("original_filename", "?"),
+                        "error": f"bulk-register: {exc}",
+                    })
+                return
+        if resp is None:
+            return
         try:
-            resp = client._request("POST", register_url, json={"items": items})
             data = resp.json()
             s = data.get("summary", {})
             summary["created"] += s.get("created", 0)
