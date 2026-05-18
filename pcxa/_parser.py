@@ -260,6 +260,14 @@ def build_parser():
                    help="Stop after queueing N files (after manifest/name "
                         "filtering). Useful for graduated smoke tests. "
                         "0 = no limit (default).")
+    p.add_argument("--trust-manifest", dest="trust_manifest",
+                   action="store_true",
+                   help="Skip the server-side existing-filename pre-flight "
+                        "check and rely entirely on the manifest for dedup. "
+                        "Much faster startup on resume runs against a "
+                        "trusted manifest; risks creating duplicates if "
+                        "files were added to the target folder via other "
+                        "means.")
 
     p = files_sub.add_parser("upload-version",
                              help="Upload a new version of an existing PCXA file")

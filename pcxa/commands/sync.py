@@ -22,7 +22,7 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +38,9 @@ from pcxa.commands.files import (
 MANIFEST_VERSION = 1
 BULK_REGISTER_FLUSH_SIZE = 100
 EXISTING_FILES_PAGE_SIZE = 200
+EXISTING_FILES_TIMEOUT = 180
+EXISTING_FILES_RETRIES = 3
+EXISTING_FILES_WORKERS = 6
 MANIFEST_CHECKPOINT_SECONDS = 30
 MANIFEST_CHECKPOINT_FILES = 50
 R2_MAX_PARTS = 10000
@@ -118,9 +121,26 @@ def cmd_files_sync(client, args):
                       key=lambda x: (x.count("/"), x))
     rel_dir_to_folder_id = _resolve_or_create_folders(client, rel_dirs, root_folder_id)
 
-    print("Reading existing filenames in target folders...", file=sys.stderr)
     target_folder_ids = {fid for fid in rel_dir_to_folder_id.values() if fid is not None}
-    folder_to_existing = _fetch_existing_names(client, target_folder_ids)
+    if getattr(args, "trust_manifest", False):
+        print(
+            "Skipping existing-filename check (--trust-manifest): "
+            "dedup will rely on the manifest only.",
+            file=sys.stderr,
+        )
+        folder_to_existing = {fid: set() for fid in target_folder_ids}
+    else:
+        print("Reading existing filenames in target folders...", file=sys.stderr)
+        try:
+            folder_to_existing = _fetch_existing_names(client, target_folder_ids)
+        except Exception as exc:
+            print(
+                f"Warning: pre-flight name check failed ({exc}). "
+                f"Proceeding with manifest-only dedup. Duplicate uploads "
+                f"may occur for files added via other means.",
+                file=sys.stderr,
+            )
+            folder_to_existing = {fid: set() for fid in target_folder_ids}
 
     work_items = []
     skipped_manifest = 0
@@ -361,33 +381,90 @@ def _resolve_or_create_folders(client, rel_dirs, root_folder_id):
     return cache
 
 
-def _fetch_existing_names(client, folder_ids):
-    """For each folder id, return the set of names already there."""
-    result = {}
-    for fid in folder_ids:
-        names = set()
-        page = 1
-        while True:
-            data = client.get("files/", {
+def _fetch_one_folder_names(client, fid):
+    """Fetch the name-set for a single folder, paginating internally.
+
+    Uses ``client._request`` directly so we can pass a longer timeout than
+    the 30s default — folder listings on the `files/` endpoint can take
+    well over that under load.
+    """
+    names = set()
+    page = 1
+    while True:
+        resp = client._request(
+            "GET",
+            client._url("files/"),
+            params={
                 "folder": fid,
                 "page": page,
                 "page_size": EXISTING_FILES_PAGE_SIZE,
-            })
-            results = data.get("results", []) if isinstance(data, dict) else data
-            for f in results:
-                title = (f.get("title") or "").strip().lower()
-                if title:
-                    names.add(title)
-                cv = f.get("current_version") or {}
-                meta = cv.get("file_metadata") or {}
-                orig = (meta.get("original_filename") or "").strip().lower()
-                if orig:
-                    names.add(orig)
-                    names.add(Path(orig).stem.lower())
-            if not (isinstance(data, dict) and data.get("next")):
-                break
-            page += 1
-        result[fid] = names
+            },
+            timeout=EXISTING_FILES_TIMEOUT,
+        )
+        data = resp.json()
+        results = data.get("results", []) if isinstance(data, dict) else data
+        for f in results:
+            title = (f.get("title") or "").strip().lower()
+            if title:
+                names.add(title)
+            cv = f.get("current_version") or {}
+            meta = cv.get("file_metadata") or {}
+            orig = (meta.get("original_filename") or "").strip().lower()
+            if orig:
+                names.add(orig)
+                names.add(Path(orig).stem.lower())
+        if not (isinstance(data, dict) and data.get("next")):
+            break
+        page += 1
+    return names
+
+
+def _fetch_existing_names(client, folder_ids):
+    """For each folder id, return the set of names already there.
+
+    Resilience: per-folder retry with exponential backoff on transient
+    ConnectionError/HTTPError, parallelized across a small worker pool
+    (server load on `files/` is the limiting factor — keep this well
+    below upload concurrency). Folders that exhaust their retry budget
+    are dropped from the result with a warning; the manifest still
+    protects against duplicates for files the caller has seen before.
+    """
+    result = {}
+    failures = []
+    folder_list = list(folder_ids)
+    if not folder_list:
+        return result
+
+    def _fetch_with_retry(fid):
+        for attempt in range(EXISTING_FILES_RETRIES):
+            try:
+                return fid, _fetch_one_folder_names(client, fid), None
+            except (_requests.ConnectionError, _requests.HTTPError) as exc:
+                if attempt == EXISTING_FILES_RETRIES - 1:
+                    return fid, None, exc
+                time.sleep(2 ** attempt)
+        return fid, None, RuntimeError("unreachable")
+
+    workers = min(EXISTING_FILES_WORKERS, max(1, len(folder_list)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_fetch_with_retry, fid) for fid in folder_list]
+        for fut in as_completed(futures):
+            fid, names, err = fut.result()
+            if err is not None:
+                failures.append((fid, err))
+            else:
+                result[fid] = names
+
+    if failures:
+        sample = ", ".join(str(fid) for fid, _ in failures[:5])
+        more = "" if len(failures) <= 5 else f" (+{len(failures) - 5} more)"
+        print(
+            f"Warning: {len(failures)} folders' existing names couldn't be "
+            f"fetched after {EXISTING_FILES_RETRIES} attempts: {sample}{more}. "
+            f"Their files will be matched against the manifest only — "
+            f"duplicate uploads may occur for files added via other means.",
+            file=sys.stderr,
+        )
     return result
 
 
