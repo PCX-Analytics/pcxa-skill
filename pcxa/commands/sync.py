@@ -254,6 +254,8 @@ def cmd_files_sync(client, args):
         summary=summary,
         batch_size=batch_size,
         use_bulk_presign=use_bulk_presign,
+        error_log_path=getattr(args, "error_log", None),
+        stats_interval=float(getattr(args, "stats_interval", 0.0) or 0.0),
     )
 
     if manifest_path:
@@ -708,8 +710,54 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                  root_folder_id, tags, initial_concurrency, min_concurrency,
                  max_concurrency, part_concurrency, auto_tune, max_failures,
                  multipart_threshold, part_size, pending_bytes, summary,
-                 batch_size, use_bulk_presign):
+                 batch_size, use_bulk_presign,
+                 error_log_path=None, stats_interval=0.0):
     register_url = client._url("files/bulk-register/")
+
+    # ── Live error log + periodic stats (issue: troubleshooting low-
+    # throughput runs needed mid-run per-file errors, not just
+    # end-of-run summary.failures). ──
+    #
+    # error_log_path: JSON-Lines file. One line per failure with phase
+    # (upload/bulk_presign/bulk_register), HTTP status, body excerpt,
+    # filename, timing. Append-mode so re-runs accumulate.
+    #
+    # stats_interval: seconds between periodic JSON stats lines to
+    # stderr. 0 disables. Lets operators eyeball real-time throughput
+    # / error rate / pool reuse without scraping the progress bar.
+    error_log_lock = threading.Lock()
+    error_log_fh = None
+    if error_log_path:
+        try:
+            error_log_fh = open(error_log_path, "a", buffering=1)  # line-buffered
+        except OSError as exc:
+            print(f"warn: --error-log {error_log_path!r}: {exc} (continuing without)",
+                  file=sys.stderr)
+
+    def _log_error(*, phase, name, status_code=None, error=None,
+                   detail=None, batch_size_=None, **extra):
+        if error_log_fh is None:
+            return
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "phase": phase,
+            "name": name,
+        }
+        if status_code is not None:
+            record["status"] = status_code
+        if error is not None:
+            record["error"] = str(error)[:500]
+        if detail is not None:
+            record["detail"] = str(detail)[:500]
+        if batch_size_ is not None:
+            record["batch_size"] = batch_size_
+        record.update({k: v for k, v in extra.items() if v is not None})
+        line = json.dumps(record, default=str) + "\n"
+        with error_log_lock:
+            try:
+                error_log_fh.write(line)
+            except Exception:
+                pass
     pending = []
     pending_lock = threading.Lock()
     state_lock = threading.Lock()
@@ -760,6 +808,13 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                             "name": it.get("original_filename", "?"),
                             "error": f"bulk-register: {exc}",
                         })
+                    _log_error(
+                        phase="bulk_register",
+                        name=f"<batch of {len(items)}>",
+                        error=str(exc),
+                        batch_size_=len(items),
+                        attempt=attempt + 1,
+                    )
                     return
                 time.sleep(2 ** attempt)
             except Exception as exc:
@@ -768,18 +823,29 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                 # (validation, missing storage_key, etc.). Stringifying
                 # the exception alone loses that.
                 detail = ""
+                status_code = None
                 resp_obj = getattr(exc, "response", None)
                 if resp_obj is not None:
                     try:
-                        detail = f" detail={resp_obj.text[:400]}"
+                        detail = resp_obj.text[:400]
+                        status_code = getattr(resp_obj, "status_code", None)
                     except Exception:
                         pass
                 summary["error"] += len(items)
                 for it in items:
                     summary["failures"].append({
                         "name": it.get("original_filename", "?"),
-                        "error": f"bulk-register: {exc}{detail}",
+                        "error": f"bulk-register: {exc}"
+                                 + (f" detail={detail}" if detail else ""),
                     })
+                _log_error(
+                    phase="bulk_register",
+                    name=f"<batch of {len(items)}>",
+                    status_code=status_code,
+                    error=str(exc),
+                    detail=detail or None,
+                    batch_size_=len(items),
+                )
                 return
         if resp is None:
             return
@@ -801,6 +867,12 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                         "name": item.get("original_filename", "?"),
                         "error": row.get("error", "unknown"),
                     })
+                    _log_error(
+                        phase="bulk_register_row",
+                        name=item.get("original_filename", "?"),
+                        error=row.get("error", "unknown"),
+                        storage_key=item.get("storage_key"),
+                    )
                     continue
                 if not rel_path:
                     continue
@@ -991,6 +1063,63 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     flush_thread = threading.Thread(target=_flush_worker, daemon=True)
     flush_thread.start()
 
+    # Periodic stats emitter. JSON line per interval to stderr so the
+    # operator can eyeball real-time throughput / error rate / pool
+    # reuse without scraping the progress bar. Off by default (0 sec).
+    stats_thread = None
+    if stats_interval and stats_interval > 0:
+        from pcxa._http import _STATS as _http_stats, _STATS_LOCK as _http_stats_lock
+
+        def _stats_worker():
+            last_done = 0
+            last_bytes = 0
+            last_t = time.monotonic()
+            while not flush_done.is_set() and not interrupted.is_set():
+                # Sleep in 0.5s slices so shutdown is responsive.
+                slept = 0.0
+                while slept < stats_interval:
+                    if flush_done.is_set() or interrupted.is_set():
+                        return
+                    time.sleep(0.5)
+                    slept += 0.5
+                now = time.monotonic()
+                with state_lock:
+                    done = state["files_done"]
+                    bdone = state["bytes_done"]
+                d_done = done - last_done
+                d_bytes = bdone - last_bytes
+                window = max(0.001, now - last_t)
+                with _http_stats_lock:
+                    http_total = (_http_stats["new_conns"]
+                                  + _http_stats["reused_conns"])
+                    reuse_rate = (100.0 * _http_stats["reused_conns"]
+                                  / http_total) if http_total else 0.0
+                    new_conns = _http_stats["new_conns"]
+                    retries = _http_stats["retries_on_disconnect"]
+                rec = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "kind": "stats",
+                    "files_done": done,
+                    "bytes_done": bdone,
+                    "window_files_per_s": round(d_done / window, 2),
+                    "window_MB_per_s": round(d_bytes / window / 1e6, 2),
+                    "concurrency": slots.target,
+                    "errors": summary["error"],
+                    "http_reuse_pct": round(reuse_rate, 1),
+                    "http_new_conns": new_conns,
+                    "http_retries_on_disconnect": retries,
+                }
+                try:
+                    sys.stderr.write("\r" + " " * 140 + "\r")
+                    sys.stderr.write(json.dumps(rec) + "\n")
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                last_done, last_bytes, last_t = done, bdone, now
+
+        stats_thread = threading.Thread(target=_stats_worker, daemon=True)
+        stats_thread.start()
+
     # AIMD controller thread.
     controller_thread = None
     if auto_tune:
@@ -1108,6 +1237,29 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
             })
             with state_lock:
                 state["files_done"] += 1
+            # Pull HTTP detail off the exception if present so the live
+            # log distinguishes R2 PUT 403 from backend presign 5xx from
+            # plain ConnectionError. The CLI's HTTPError carries
+            # ``.response.text`` and ``.response.status_code``; bare
+            # ConnectionError doesn't.
+            status_code = None
+            detail = None
+            resp_obj = getattr(exc, "response", None)
+            if resp_obj is not None:
+                try:
+                    status_code = getattr(resp_obj, "status_code", None)
+                    detail = resp_obj.text[:400]
+                except Exception:
+                    pass
+            _log_error(
+                phase="upload",
+                name=entry["name"],
+                status_code=status_code,
+                error=str(exc),
+                detail=detail,
+                rel_path=entry.get("relative_path"),
+                size=entry.get("size"),
+            )
         _render()
         if max_failures and summary["error"] >= max_failures \
                 and not interrupted.is_set():
@@ -1157,6 +1309,13 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                         })
                         with state_lock:
                             state["files_done"] += 1
+                        _log_error(
+                            phase="bulk_presign",
+                            name=entry["name"],
+                            error=str(key_or_err),
+                            rel_path=entry.get("relative_path"),
+                            size=entry.get("size"),
+                        )
                         _render()
                         submitted_any = True
                         continue
@@ -1205,6 +1364,8 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     # we don't race it for the last `pending` items.
     flush_done.set()
     flush_thread.join(timeout=10.0)
+    if stats_thread is not None:
+        stats_thread.join(timeout=2.0)
 
     # Final drain — chunked so we never exceed the server's 200-item cap.
     _drain_pending_in_chunks()
@@ -1214,6 +1375,11 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     _render(force=True)
     sys.stderr.write("\n")
     sys.stderr.flush()
+    if error_log_fh is not None:
+        try:
+            error_log_fh.close()
+        except Exception:
+            pass
 
 
 # ───────────────────────── auto-tune controller ─────────────────────────

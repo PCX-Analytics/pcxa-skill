@@ -268,6 +268,20 @@ def build_parser():
                         "trusted manifest; risks creating duplicates if "
                         "files were added to the target folder via other "
                         "means.")
+    p.add_argument("--error-log", dest="error_log", default=None,
+                   help="Path to a JSON-Lines file. One line per per-file "
+                        "or per-batch failure with phase (presign/put/"
+                        "register), HTTP status, response-body excerpt, "
+                        "and timing. Use for live diagnosis of low-"
+                        "throughput / high-error runs — failures normally "
+                        "only surface in the end-of-run summary, which is "
+                        "useless mid-run.")
+    p.add_argument("--stats-interval", dest="stats_interval", type=float,
+                   default=0.0,
+                   help="If >0, emit a JSON stats line to stderr every N "
+                        "seconds: throughput, in-flight, errors, http "
+                        "reuse rate, retries. Default 0 = off. 30 is a "
+                        "reasonable starting point for long runs.")
 
     p = files_sub.add_parser("upload-version",
                              help="Upload a new version of an existing PCXA file")
