@@ -760,11 +760,22 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                     return
                 time.sleep(2 ** attempt)
             except Exception as exc:
+                # Capture response body when available — a 400 from
+                # bulk-register tells us *why* the row didn't land
+                # (validation, missing storage_key, etc.). Stringifying
+                # the exception alone loses that.
+                detail = ""
+                resp_obj = getattr(exc, "response", None)
+                if resp_obj is not None:
+                    try:
+                        detail = f" detail={resp_obj.text[:400]}"
+                    except Exception:
+                        pass
                 summary["error"] += len(items)
                 for it in items:
                     summary["failures"].append({
                         "name": it.get("original_filename", "?"),
-                        "error": f"bulk-register: {exc}",
+                        "error": f"bulk-register: {exc}{detail}",
                     })
                 return
         if resp is None:
@@ -908,6 +919,67 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
             state["since_manifest_save"] = 0
             state["last_manifest_save"] = time.monotonic()
 
+    # Background flush worker. Pulled off the as_completed loop so the
+    # synchronous bulk-register POST + manifest save (~1-7s each) no
+    # longer stalls upload-completion processing. See issue #661 — the
+    # every-50-files dip in the throughput timeline was this stall.
+    flush_done = threading.Event()
+
+    def _drain_pending_in_chunks():
+        """Drain `pending` and bulk-register in chunks of <= FLUSH_SIZE.
+
+        Server caps bulk-register at 200 items. We use FLUSH_SIZE (100)
+        as the chunk size to leave headroom and match the legacy
+        behavior. Returns True if any items were flushed.
+        """
+        any_flushed = False
+        while True:
+            with pending_lock:
+                if not pending:
+                    break
+                batch = pending[:BULK_REGISTER_FLUSH_SIZE]
+                del pending[:BULK_REGISTER_FLUSH_SIZE]
+            _flush_locked(batch)
+            any_flushed = True
+        return any_flushed
+
+    def _flush_worker():
+        while not flush_done.is_set():
+            did_work = False
+            # 1) Threshold-based bulk-register.
+            with pending_lock:
+                need = len(pending) >= BULK_REGISTER_FLUSH_SIZE
+            if need:
+                with pending_lock:
+                    batch = pending[:BULK_REGISTER_FLUSH_SIZE]
+                    del pending[:BULK_REGISTER_FLUSH_SIZE]
+                if batch:
+                    _flush_locked(batch)
+                    did_work = True
+            # 2) Periodic manifest checkpoint.
+            if manifest_path:
+                with state_lock:
+                    since = state["since_manifest_save"]
+                    elapsed = time.monotonic() - state["last_manifest_save"]
+                if since >= MANIFEST_CHECKPOINT_FILES \
+                        or elapsed >= MANIFEST_CHECKPOINT_SECONDS:
+                    # Drain in chunks so we never exceed the server cap.
+                    _drain_pending_in_chunks()
+                    _save_manifest(
+                        manifest_path, manifest, input_root, root_folder_id,
+                    )
+                    with state_lock:
+                        state["since_manifest_save"] = 0
+                        state["last_manifest_save"] = time.monotonic()
+                    did_work = True
+            if not did_work:
+                # No work — short nap. ~10 polls/sec is plenty granular
+                # and the CPU cost is negligible.
+                time.sleep(0.1)
+
+    flush_thread = threading.Thread(target=_flush_worker, daemon=True)
+    flush_thread.start()
+
     # AIMD controller thread.
     controller_thread = None
     if auto_tune:
@@ -1005,9 +1077,11 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                 })
                 with state_lock:
                     state["files_done"] += 1
-            _maybe_flush()
+            # _maybe_flush / _maybe_checkpoint_manifest run in the
+            # background flush_thread (see _flush_worker); keep this
+            # loop tight so as_completed never stalls on a bulk-register
+            # POST. See issue #661.
             _render()
-            _maybe_checkpoint_manifest()
 
             if max_failures and summary["error"] >= max_failures \
                     and not interrupted.is_set():
@@ -1035,9 +1109,15 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     if controller_thread:
         controller_thread.join(timeout=2.0)
 
-    with pending_lock:
-        leftover, pending[:] = list(pending), []
-    _flush_locked(leftover)
+    # Stop the background flush worker before we do the final drain, so
+    # we don't race it for the last `pending` items.
+    flush_done.set()
+    flush_thread.join(timeout=10.0)
+
+    # Final drain — chunked so we never exceed the server's 200-item cap.
+    _drain_pending_in_chunks()
+    if manifest_path:
+        _save_manifest(manifest_path, manifest, input_root, root_folder_id)
     summary["concurrency_final"] = slots.target
     _render(force=True)
     sys.stderr.write("\n")
