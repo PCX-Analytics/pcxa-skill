@@ -805,11 +805,19 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                 if not rel_path:
                     continue
                 with manifest_lock:
+                    # Backend's bulk-register response shape is
+                    # ``{"status": "created", "id": <pk>, ...}`` — the
+                    # field is ``id``, not ``file_id``. The original
+                    # read silently wrote ``file_id: null`` into every
+                    # manifest entry across the entire upload campaign;
+                    # fall back through ``id`` first and accept
+                    # ``file_id`` for forward-compat if the backend ever
+                    # renames.
                     manifest["files"][rel_path] = {
                         "size": item.get("file_size"),
                         "name": item.get("original_filename"),
                         "folder_id": item.get("folder"),
-                        "file_id": row.get("file_id"),
+                        "file_id": row.get("id") or row.get("file_id"),
                         "uploaded_at": datetime.now(timezone.utc).isoformat(),
                     }
         except Exception as exc:
