@@ -22,7 +22,10 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue as _queue
+from concurrent.futures import (
+    FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait,
+)
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -993,114 +996,195 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
 
     _render(force=True)
 
-    # Mutable container so _process_batch can flip it off after a 404,
-    # and the change persists across batches in the same run.
+    # Mutable container so the feeder thread can flip it off after a 404
+    # and the change persists for the rest of the run.
     bulk_flag = [bool(use_bulk_presign)]
 
-    def _process_batch(pool, batch):
-        # Step 1: bulk-presign the small files (multipart files always go
-        # through their own per-file presign path; the bulk endpoint
-        # issues single-PUT URLs only).
-        presigned = {}  # entry id() -> (upload_url, storage_key)
-        small = [e for e in batch if e["size"] <= multipart_threshold]
-        if bulk_flag[0] and small:
-            try:
-                results = _bulk_presign(client, small)
-            except _requests.HTTPError as exc:
-                code = getattr(exc.response, "status_code", 0)
-                if code == 404:
-                    bulk_flag[0] = False
-                    _log_autotune(
-                        "[bulk-presign] endpoint not deployed (404) — "
-                        "falling back to per-file presign for the rest "
-                        "of this run"
-                    )
-                else:
-                    _log_autotune(
-                        f"[bulk-presign] HTTP {code}: {exc} — using "
-                        "legacy presign for this batch"
-                    )
-                results = []
-            except Exception as exc:
-                _log_autotune(
-                    f"[bulk-presign] {exc} — using legacy presign "
-                    "for this batch"
-                )
-                results = []
+    # ── Rolling pipeline: presign feeder + continuous submit/drain ──
+    #
+    # Replaces the prior per-batch barrier (where `_process_batch` would
+    # bulk-presign N files, submit N futures, then wait for ALL N to
+    # complete before moving on). That barrier wasted concurrency at the
+    # tail of every batch — slowest 1-2 files held back the next batch's
+    # entire submission.
+    #
+    # Now: a feeder thread pre-presigns the next chunk while the upload
+    # pool keeps eating from a bounded ready_queue. The queue cap
+    # (batch_size * 2) caps memory and keeps presigned URLs fresh —
+    # 15-min TTL means we don't want a 60K-item feeder lead.
+    ready_queue = _queue.Queue(maxsize=max(2, batch_size * 2))
+    feeder_done = threading.Event()
+    # Sentinel for per-item bulk-presign errors that need to surface as
+    # immediate failures in the main loop without going through the pool.
+    _PRESIGN_ERR = object()
 
-            for entry, url, key, err in results:
-                if err:
-                    summary["error"] += 1
-                    summary["failures"].append({
-                        "name": entry["name"],
-                        "error": f"bulk-presign: {err}",
-                    })
-                    with state_lock:
-                        state["files_done"] += 1
-                    _render()
-                elif url:
-                    presigned[id(entry)] = (url, key)
-
-        # Step 2: submit uploads for the batch.
-        future_to_entry = {}
-        for entry in batch:
-            if interrupted.is_set():
-                break
-            pair = presigned.get(id(entry))
-            if pair is not None:
-                url, key = pair
-                fut = pool.submit(
-                    _with_retry, _gated_upload_presigned, entry, url, key
-                )
-            else:
-                fut = pool.submit(_with_retry, _gated_upload, entry)
-            future_to_entry[fut] = entry
-
-        # Step 3: drain completions for this batch before moving on.
-        for future in _as_completed_with_interrupt(future_to_entry, interrupted):
-            entry = future_to_entry[future]
-            try:
-                item = future.result()
-                item["_sync_rel_path"] = entry["relative_path"]
-                if tags:
-                    item["tags"] = list(tags)
-                with pending_lock:
-                    pending.append(item)
-                with state_lock:
-                    state["files_done"] += 1
-                    state["bytes_done"] += entry["size"]
-                    state["since_manifest_save"] += 1
-            except Exception as exc:
-                summary["error"] += 1
-                summary["failures"].append({
-                    "name": entry["name"], "error": str(exc),
-                })
-                with state_lock:
-                    state["files_done"] += 1
-            # _maybe_flush / _maybe_checkpoint_manifest run in the
-            # background flush_thread (see _flush_worker); keep this
-            # loop tight so as_completed never stalls on a bulk-register
-            # POST. See issue #661.
-            _render()
-
-            if max_failures and summary["error"] >= max_failures \
-                    and not interrupted.is_set():
-                interrupted.set()
-                summary["aborted_max_failures"] = True
-                _log_autotune(
-                    f"[abort] failure budget exceeded "
-                    f"({summary['error']}/{max_failures}) — stopping."
-                )
-
-    try:
-        # Pool stays sized at max_concurrency; the semaphore is the real
-        # throttle. Excess workers just park on slots.acquire().
-        with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+    def _presign_feeder():
+        try:
             for batch_start in range(0, len(work_items), batch_size):
                 if interrupted.is_set():
                     break
                 batch = work_items[batch_start:batch_start + batch_size]
-                _process_batch(pool, batch)
+                small = [e for e in batch
+                         if e["size"] <= multipart_threshold]
+                # Multipart files use their own per-file presign path
+                # inside _upload_one — feeder just forwards them.
+                large = [e for e in batch
+                         if e["size"] > multipart_threshold]
+                for e in large:
+                    if interrupted.is_set():
+                        return
+                    ready_queue.put((e, None, None))
+
+                presigned = {}
+                if bulk_flag[0] and small:
+                    try:
+                        results = _bulk_presign(client, small)
+                    except _requests.HTTPError as exc:
+                        code = getattr(exc.response, "status_code", 0)
+                        if code == 404:
+                            bulk_flag[0] = False
+                            _log_autotune(
+                                "[bulk-presign] endpoint not deployed "
+                                "(404) — falling back to per-file "
+                                "presign for the rest of this run"
+                            )
+                        else:
+                            _log_autotune(
+                                f"[bulk-presign] HTTP {code}: {exc} — "
+                                "using legacy presign for this batch"
+                            )
+                        results = []
+                    except Exception as exc:
+                        _log_autotune(
+                            f"[bulk-presign] {exc} — using legacy "
+                            "presign for this batch"
+                        )
+                        results = []
+                    for entry, url, key, err in results:
+                        if err:
+                            ready_queue.put((entry, _PRESIGN_ERR, err))
+                        elif url:
+                            presigned[id(entry)] = (url, key)
+                for e in small:
+                    if interrupted.is_set():
+                        return
+                    pair = presigned.get(id(e))
+                    if pair is not None:
+                        ready_queue.put((e, pair[0], pair[1]))
+                    else:
+                        # No bulk URL → fall through to _gated_upload's
+                        # per-file presign-and-put path.
+                        ready_queue.put((e, None, None))
+        finally:
+            feeder_done.set()
+
+    feeder_thread = threading.Thread(target=_presign_feeder, daemon=True)
+    feeder_thread.start()
+
+    def _handle_completion(future, entry):
+        try:
+            item = future.result()
+            item["_sync_rel_path"] = entry["relative_path"]
+            if tags:
+                item["tags"] = list(tags)
+            with pending_lock:
+                pending.append(item)
+            with state_lock:
+                state["files_done"] += 1
+                state["bytes_done"] += entry["size"]
+                state["since_manifest_save"] += 1
+        except Exception as exc:
+            summary["error"] += 1
+            summary["failures"].append({
+                "name": entry["name"], "error": str(exc),
+            })
+            with state_lock:
+                state["files_done"] += 1
+        _render()
+        if max_failures and summary["error"] >= max_failures \
+                and not interrupted.is_set():
+            interrupted.set()
+            summary["aborted_max_failures"] = True
+            _log_autotune(
+                f"[abort] failure budget exceeded "
+                f"({summary['error']}/{max_failures}) — stopping."
+            )
+
+    # Cap on submitted-but-not-completed work. The slots semaphore is
+    # still the real concurrency gate; this just keeps the executor's
+    # internal queue (and memory of presigned URLs in flight) bounded.
+    in_flight_cap = max(max_concurrency * 4, 16)
+
+    try:
+        with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+            in_flight = {}  # future -> entry
+            while True:
+                if interrupted.is_set():
+                    # Drain remaining futures so they don't get cancelled
+                    # mid-PUT and leak partial uploads. _gated_upload
+                    # checks interrupted internally.
+                    for fut in list(in_flight.keys()):
+                        entry = in_flight.pop(fut)
+                        try:
+                            _handle_completion(fut, entry)
+                        except Exception:
+                            pass
+                    break
+
+                # Submit ready work while we have headroom.
+                submitted_any = False
+                while len(in_flight) < in_flight_cap:
+                    try:
+                        work = ready_queue.get_nowait()
+                    except _queue.Empty:
+                        break
+                    entry, url_or_marker, key_or_err = work
+                    if url_or_marker is _PRESIGN_ERR:
+                        # Per-item bulk-presign failure — surface
+                        # immediately, no pool submit.
+                        summary["error"] += 1
+                        summary["failures"].append({
+                            "name": entry["name"],
+                            "error": f"bulk-presign: {key_or_err}",
+                        })
+                        with state_lock:
+                            state["files_done"] += 1
+                        _render()
+                        submitted_any = True
+                        continue
+                    if url_or_marker is not None:
+                        fut = pool.submit(
+                            _with_retry, _gated_upload_presigned,
+                            entry, url_or_marker, key_or_err,
+                        )
+                    else:
+                        fut = pool.submit(
+                            _with_retry, _gated_upload, entry,
+                        )
+                    in_flight[fut] = entry
+                    submitted_any = True
+
+                # Termination: feeder done, queue empty, nothing in flight.
+                if not in_flight:
+                    if feeder_done.is_set() and ready_queue.empty():
+                        break
+                    if not submitted_any:
+                        # Feeder is producing but pipeline is idle —
+                        # don't spin.
+                        time.sleep(0.02)
+                    continue
+
+                # Wait for at least one completion before looping back to
+                # the submit phase. Short timeout so we can poll the
+                # interrupt flag and re-fill the pipeline promptly.
+                done_futs, _ = wait(
+                    list(in_flight.keys()),
+                    timeout=0.1,
+                    return_when=FIRST_COMPLETED,
+                )
+                for fut in done_futs:
+                    entry = in_flight.pop(fut)
+                    _handle_completion(fut, entry)
     except KeyboardInterrupt:
         interrupted.set()
         _log_autotune("[interrupted] flushing partial progress...")
@@ -1122,24 +1206,6 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     _render(force=True)
     sys.stderr.write("\n")
     sys.stderr.flush()
-
-
-def _as_completed_with_interrupt(future_to_entry, interrupted):
-    """Yield futures as they complete; bail out promptly on interrupt.
-
-    Wrapping ``as_completed`` so the loop can short-circuit when the
-    failure-budget circuit-breaker or Ctrl-C fires, instead of waiting
-    for every parked worker to drain naturally.
-    """
-    from concurrent.futures import as_completed
-    it = as_completed(future_to_entry)
-    while True:
-        if interrupted.is_set():
-            return
-        try:
-            yield next(it)
-        except StopIteration:
-            return
 
 
 # ───────────────────────── auto-tune controller ─────────────────────────
