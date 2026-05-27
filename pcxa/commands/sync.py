@@ -46,6 +46,7 @@ EXISTING_FILES_RETRIES = 3
 EXISTING_FILES_WORKERS = 6
 BULK_REGISTER_TIMEOUT = 180
 BULK_REGISTER_RETRIES = 3
+BULK_REGISTER_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 MANIFEST_CHECKPOINT_SECONDS = 30
 MANIFEST_CHECKPOINT_FILES = 50
 R2_MAX_PARTS = 10000
@@ -831,6 +832,15 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                         status_code = getattr(resp_obj, "status_code", None)
                     except Exception:
                         pass
+                # Retry transient server errors (5xx, 429) — a single
+                # bulk-register 5xx was counting 80-100 small files as
+                # errors at once when a large-file PUT unblocked the
+                # bg_flush_worker queue. Client errors (4xx exc. 429)
+                # are not retryable.
+                if status_code in BULK_REGISTER_RETRY_STATUSES \
+                        and attempt < BULK_REGISTER_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+                    continue
                 summary["error"] += len(items)
                 for it in items:
                     summary["failures"].append({
