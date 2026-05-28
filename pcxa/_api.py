@@ -27,6 +27,14 @@ from pcxa._config import load_config, save_config
 from pcxa._http import requests
 
 
+class AuthExpiredError(RuntimeError):
+    """Access token is expired and the refresh token cannot renew it.
+
+    Retrying will not help — the user must run ``pcxa login`` to get a
+    fresh token pair before continuing.
+    """
+
+
 # Refresh the access_token when its remaining lifetime drops below this many
 # seconds. Tokens typically live ~15-90 min, so a 5-min leeway gives plenty of
 # headroom even under clock skew without burning refreshes for short scripts.
@@ -211,6 +219,11 @@ class APIClient:
             if body.get("code") == "token_not_valid" or resp.status_code == 401:
                 if self._refresh_token():
                     resp = self.session.request(method, url, **kwargs)
+                elif body.get("code") == "token_not_valid":
+                    raise AuthExpiredError(
+                        "Access token expired and refresh failed — "
+                        "run `pcxa login` and retry"
+                    )
         resp.raise_for_status()
         return resp
 

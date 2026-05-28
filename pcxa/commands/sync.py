@@ -31,6 +31,7 @@ from pathlib import Path
 
 from pcxa._output import fmt_size, out_json
 from pcxa._http import requests as _requests
+from pcxa._api import AuthExpiredError
 from pcxa.commands.files import (
     _multipart_presign_and_put,
     _presign_and_put,
@@ -117,6 +118,9 @@ def cmd_files_sync(client, args):
     if root_folder_id is not None:
         try:
             client.get(f"folders/{root_folder_id}/")
+        except AuthExpiredError as exc:
+            print(f"Token expired: {exc}", file=sys.stderr)
+            sys.exit(2)
         except _requests.HTTPError as exc:
             print(f"Target folder id={root_folder_id} not accessible: {exc}",
                   file=sys.stderr)
@@ -774,6 +778,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
         "autotune_messages": [],
     }
     interrupted = threading.Event()
+    fatal_error: list[BaseException] = []  # at most one element; written by bg thread
     slots = AdjustableSemaphore(
         initial=initial_concurrency,
         minimum=min_concurrency,
@@ -801,6 +806,13 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                     timeout=BULK_REGISTER_TIMEOUT,
                 )
                 break
+            except AuthExpiredError as exc:
+                # Token expired mid-run and refresh failed. Signal the main
+                # loop to stop immediately — retrying this batch won't help.
+                if not fatal_error:
+                    fatal_error.append(exc)
+                interrupted.set()
+                return
             except _requests.ConnectionError as exc:
                 if attempt == BULK_REGISTER_RETRIES - 1:
                     summary["error"] += len(items)
@@ -1376,6 +1388,14 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     flush_thread.join(timeout=10.0)
     if stats_thread is not None:
         stats_thread.join(timeout=2.0)
+
+    if fatal_error:
+        print(
+            f"\nFatal: {fatal_error[0]}\n"
+            "Run `pcxa login` then restart from this chunk.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     # Final drain — chunked so we never exceed the server's 200-item cap.
     _drain_pending_in_chunks()
