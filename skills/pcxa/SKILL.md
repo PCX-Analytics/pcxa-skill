@@ -68,9 +68,9 @@ Always pass `--company` when picking — `--local` writes a `.pcxa` file in CWD;
 
 ### How resolution works
 
-Project scope resolves in this order: **repo `.pcxa` file** > **global profile default**. `.pcxa` is committed (no secrets — just `{ "company": 4, "project": 10, "user": "alice@example.com" }`). Different repos can pin different accounts via the `user` field; the CLI matches it against profile usernames in `~/.pcxa/credentials.json`.
+Project scope resolves in this order: **repo `.pcxa` file** > **active profile default**. `.pcxa` is committed (no secrets — just `{ "company": 4, "project": 10, "user": "alice@example.com" }`). Different repos can pin different accounts via the `user` field; the CLI matches it against profile usernames in the active credentials file.
 
-Credentials are global at `~/.pcxa/credentials.json` (one file, never inside a repo). Pre-0.3 locations (`~/.file_explorer/config.json`, `<repo>/.pcxa-credentials.json`) are auto-migrated on first run.
+Credentials resolve **folder-first**: a `.pcxa-credentials.json` found by walking up from CWD is used for both reads and writes (token refresh included); otherwise the global `~/.pcxa/credentials.json` is used. So `pcxa login` from inside a repo writes that repo's own `.pcxa-credentials.json` (at the git root, gitignored) and can't clobber another repo's tokens — pass `--global` to write the shared global file instead. Pre-0.3 global creds at `~/.file_explorer/config.json` are auto-migrated to `~/.pcxa/credentials.json` on first run.
 
 State to surface to the user on the first turn: `whoami` shows `Active profile`, `User`, `Company`, `Project` (with `(from .pcxa)` annotation when applicable), `Creds:`, and `Repo pin:`. If you ran setup steps, echo the resulting scope back ("Operating on project Acme Tower (4)") so the user can correct you before any writes.
 

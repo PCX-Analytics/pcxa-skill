@@ -32,6 +32,8 @@ def build_parser():
     p.add_argument("--timeout", type=int, default=120, help="Seconds to wait for browser (default: 120)")
     p.add_argument("--no-setup", action="store_true",
                    help="Skip the post-login interactive company/project picker. Use when an agent (e.g. Claude Code) drives login non-interactively; the agent should follow up with `pcxa projects` and `pcxa set-project`.")
+    p.add_argument("--global", dest="use_global", action="store_true",
+                   help="Store credentials in the global ~/.pcxa/credentials.json instead of a per-repo .pcxa-credentials.json.")
 
     # ── projects (list accessible projects across companies) ──
     p = sub.add_parser("projects", help="List all projects you have access to (across companies)")
@@ -46,6 +48,8 @@ def build_parser():
     p.add_argument("--company", type=int, help="Company ID")
     p.add_argument("--project", type=int, help="Project ID")
     p.add_argument("--frontend-url", help="Frontend URL (defaults to --url)")
+    p.add_argument("--global", dest="use_global", action="store_true",
+                   help="Store credentials in the global ~/.pcxa/credentials.json instead of a per-repo .pcxa-credentials.json.")
 
     # ── whoami ──
     sub.add_parser("whoami", help="Show current profile")

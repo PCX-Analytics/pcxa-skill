@@ -109,33 +109,40 @@ Fallback if browser login isn't available:
 pcxa setup -u you@example.com
 ```
 
-## Per-repo sessions (without per-repo secrets)
+## Per-repo credentials
 
-All credentials live in **one global file** at `~/.pcxa/credentials.json` —
-never inside any repo. Each named profile holds the tokens for one PCXA account.
+Credentials resolve **folder-first**. When you run `pcxa` from inside a repo,
+the CLI walks up from the current directory looking for a
+`.pcxa-credentials.json` file; if it finds one, that file is used for both
+reads and writes (including token refresh). Only when no per-repo file is
+present does it fall back to the global `~/.pcxa/credentials.json`.
 
-To make a repo always use a specific account, drop a `.pcxa` file at the repo
-root with a `user` field:
+This means a `pcxa login` (or `pcxa setup`) run from a repo writes tokens into
+that repo's `.pcxa-credentials.json` by default — so logging in as one account
+in one repo can no longer clobber another repo's tokens. The file lives at the
+git root (or next to an existing `.pcxa` pin) and is already covered by
+`.gitignore`, so secrets never get committed.
 
-```json
-{ "company": 4, "project": 10, "user": "alice@example.com" }
+```
+<repo>/.pcxa-credentials.json   ← per-repo tokens (gitignored), used when present
+~/.pcxa/credentials.json        ← global fallback, used when no repo file exists
 ```
 
-`.pcxa` is committed (no secrets in it). The CLI matches `user` against profile
-usernames in `~/.pcxa/credentials.json` to pick the right account for that repo.
-This means different repos can transparently use different accounts without ever
-writing tokens into a repo and without per-repo `.gitignore` entries.
+Pass `--global` to `pcxa login` / `pcxa setup` to write to the global file
+instead (the old shared behavior). To go back to a shared session for a repo,
+delete its `.pcxa-credentials.json` and it will fall through to the global file.
 
-`pcxa login` automatically pins the new account into the repo's `.pcxa` file
-(if one exists and doesn't already pin a user), so you usually don't have to
-edit it by hand.
+You can still also pin *which account* a repo uses via a committed `.pcxa`
+file's `user` field — see [Per-repo project pinning](#per-repo-project-pinning).
+The CLI matches `user` against profile usernames in whichever credentials file
+is active.
 
-`pcxa whoami` always prints the credentials path and the active repo pin so you
-can see which session is in use.
+`pcxa whoami` prints the active credentials path (`Creds:`) and the repo pin
+(`Repo pin:`) so you can see which session and file are in use.
 
-Pre-0.3 installs that have credentials at `~/.file_explorer/config.json` or
-`<repo>/.pcxa-credentials.json` are migrated to the new location automatically
-on first run; the legacy files are left in place and can be deleted afterwards.
+Pre-0.3 installs that have global credentials at `~/.file_explorer/config.json`
+are migrated to `~/.pcxa/credentials.json` automatically on first run; the
+legacy file is left in place and can be deleted afterwards.
 
 ## Per-repo project pinning
 

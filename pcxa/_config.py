@@ -1,12 +1,14 @@
 """Credential and per-repo project-pin configuration.
 
 Storage:
-    ~/.pcxa/credentials.json — single global file with all named profiles.
-    <repo>/.pcxa             — committed per-repo file pinning {company, project, user}.
+    <repo>/.pcxa-credentials.json — per-repo credentials (secrets, gitignored).
+    ~/.pcxa/credentials.json      — global fallback shared across repos.
+    <repo>/.pcxa                  — committed per-repo file pinning {company, project, user}.
 
-Per-repo isolation across accounts is achieved via the .pcxa file's `user`
-field selecting which profile from the credentials file to use. No per-repo
-credential file exists.
+Credentials resolve folder-first: a `.pcxa-credentials.json` found by walking
+up from the current directory is used for both reads and writes (including
+token refresh), so a login from one repo can't clobber another repo's tokens.
+The global file is used only when no per-repo credentials file is present.
 """
 
 import json
@@ -25,11 +27,11 @@ _SAVE_LOCK = threading.Lock()
 GLOBAL_CONFIG_DIR = Path.home() / ".pcxa"
 GLOBAL_CONFIG_FILE = GLOBAL_CONFIG_DIR / "credentials.json"
 LOCAL_CONFIG_NAME = ".pcxa"  # repo-level project pin (committed, no secrets)
+LOCAL_CREDENTIALS_NAME = ".pcxa-credentials.json"  # per-repo credentials (secrets, gitignored)
 UPDATE_CHECK_FILE = GLOBAL_CONFIG_DIR / "last_update_check.json"
 
-# Legacy locations kept only for one-shot migration into GLOBAL_CONFIG_FILE.
+# Legacy location kept only for one-shot migration into GLOBAL_CONFIG_FILE.
 LEGACY_GLOBAL_CONFIG_FILE = Path.home() / ".file_explorer" / "config.json"
-LEGACY_LOCAL_CREDENTIALS_NAME = ".pcxa-credentials.json"
 
 
 KNOWN_FILE_TYPES = [
@@ -72,32 +74,77 @@ def find_git_root():
         current = current.parent
 
 
-def resolve_credentials_path():
-    """Return the credentials file path.
+def find_local_credentials_path():
+    """Walk up from CWD looking for a per-repo .pcxa-credentials.json file.
 
-    Always ~/.pcxa/credentials.json. Per-repo isolation across accounts is
-    achieved via the .pcxa file's `user` field selecting which profile to use;
-    no per-repo credential file exists. The second tuple element is retained
-    for callers that displayed the source label.
+    Returns the Path to the credentials file, or None if not found. Stops at
+    $HOME or the filesystem root, mirroring find_local_config_path().
     """
+    current = Path.cwd()
+    home = Path.home()
+    while True:
+        candidate = current / LOCAL_CREDENTIALS_NAME
+        if candidate.is_file():
+            return candidate
+        if current == home or current == current.parent:
+            return None
+        current = current.parent
+
+
+def resolve_credentials_path():
+    """Return (path, source) for the ACTIVE credentials file.
+
+    A per-repo .pcxa-credentials.json found by walking up from CWD wins
+    ("local"); otherwise the global ~/.pcxa/credentials.json ("global"). Both
+    reads and passive writes (token refresh) go through here, so a rotated
+    token is written back to whichever file it was loaded from.
+    """
+    local = find_local_credentials_path()
+    if local is not None:
+        return local, "local"
     return GLOBAL_CONFIG_FILE, "global"
 
 
-def get_config_file():
-    """Return the credentials config path."""
+def resolve_login_path(use_global=False):
+    """Return the path where `pcxa login` / `pcxa setup` should persist creds.
+
+    Defaults to folder-local so a login from one repo can't clobber another
+    repo's tokens. Resolution order:
+      1. use_global (--global)                  -> global file
+      2. existing .pcxa-credentials.json up-tree -> reuse it in place
+      3. inside a git repo                       -> <git_root>/.pcxa-credentials.json
+      4. a .pcxa pin exists up-tree              -> next to it
+      5. otherwise (no repo context)             -> global file
+    """
+    if use_global:
+        return GLOBAL_CONFIG_FILE
+    existing = find_local_credentials_path()
+    if existing is not None:
+        return existing
+    git_root = find_git_root()
+    if git_root is not None:
+        return git_root / LOCAL_CREDENTIALS_NAME
+    pin = find_local_config_path()
+    if pin is not None:
+        return pin.parent / LOCAL_CREDENTIALS_NAME
     return GLOBAL_CONFIG_FILE
+
+
+def get_config_file():
+    """Return the active credentials path (local-if-present, else global)."""
+    return resolve_credentials_path()[0]
 
 
 def _migrate_legacy_credentials():
     """One-shot migration from pre-0.3 credential locations.
 
-    Older versions stored credentials at:
-      - ~/.file_explorer/config.json   (global)
-      - <repo>/.pcxa-credentials.json  (per-repo)
+    Older versions stored the global credentials at ~/.file_explorer/config.json.
+    On first run after upgrade, merge it into the new ~/.pcxa/credentials.json.
+    Profiles are de-duplicated by name (first wins). The legacy file is left in
+    place; a one-shot notice is printed to stderr.
 
-    On first run after upgrade, merge any legacy files we find into the new
-    ~/.pcxa/credentials.json. Profiles are de-duplicated by name (first wins).
-    Legacy files are left in place; a one-shot notice is printed to stderr.
+    Per-repo .pcxa-credentials.json files are NOT scavenged here — they are now
+    live, folder-local credential files (see resolve_credentials_path).
     """
     if GLOBAL_CONFIG_FILE.exists():
         return
@@ -116,15 +163,6 @@ def _migrate_legacy_credentials():
         candidates.append(resolved)
 
     _add(LEGACY_GLOBAL_CONFIG_FILE)
-    _add(Path.cwd() / LEGACY_LOCAL_CREDENTIALS_NAME)
-
-    git_root = find_git_root()
-    if git_root is not None:
-        _add(git_root / LEGACY_LOCAL_CREDENTIALS_NAME)
-
-    local_marker = find_local_config_path()
-    if local_marker is not None:
-        _add(local_marker.parent / LEGACY_LOCAL_CREDENTIALS_NAME)
 
     if not candidates:
         return
@@ -163,16 +201,27 @@ def _migrate_legacy_credentials():
     )
 
 
-def load_config():
-    _migrate_legacy_credentials()
-    path = get_config_file()
+def load_config(path=None):
+    """Read the credentials config.
+
+    With no ``path``, runs the one-shot legacy migration and reads the active
+    file (local-if-present, else global). Pass an explicit ``path`` to read a
+    specific file — used by login to target the chosen destination directly.
+    """
+    if path is None:
+        _migrate_legacy_credentials()
+        path, _ = resolve_credentials_path()
     if path.exists():
         return json.loads(path.read_text())
     return {"default_profile": "local", "profiles": {}}
 
 
-def save_config(config):
+def save_config(config, path=None):
     """Atomically persist the credentials config.
+
+    With no ``path``, writes the active file (local-if-present, else global) so
+    a token rotated during a run is written back to wherever it was loaded
+    from. Pass an explicit ``path`` to target a specific file (login).
 
     Writes to a sibling tmp file then ``os.replace()`` so a crash or
     concurrent reader never sees a half-written credentials.json. The
@@ -180,7 +229,8 @@ def save_config(config):
     which can otherwise lose a freshly rotated refresh_token under sync's
     parallel workers (see issue #550).
     """
-    path = get_config_file()
+    if path is None:
+        path, _ = resolve_credentials_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with _SAVE_LOCK:
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -236,13 +286,15 @@ __all__ = [
     "GLOBAL_CONFIG_DIR",
     "GLOBAL_CONFIG_FILE",
     "LOCAL_CONFIG_NAME",
+    "LOCAL_CREDENTIALS_NAME",
     "UPDATE_CHECK_FILE",
     "LEGACY_GLOBAL_CONFIG_FILE",
-    "LEGACY_LOCAL_CREDENTIALS_NAME",
     "KNOWN_FILE_TYPES",
     "find_local_config_path",
+    "find_local_credentials_path",
     "find_git_root",
     "resolve_credentials_path",
+    "resolve_login_path",
     "get_config_file",
     "load_config",
     "save_config",
