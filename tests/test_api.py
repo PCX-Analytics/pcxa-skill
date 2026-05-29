@@ -77,10 +77,27 @@ def test_401_triggers_reactive_refresh_and_retry(client, monkeypatch):
     assert len(client.session.calls) == 2  # original + retry
 
 
-def test_401_without_refresh_token_raises(client, monkeypatch):
-    """No refresh_token → 401 surfaces as HTTPError, no infinite loop."""
+def test_token_not_valid_without_refresh_token_raises_auth_expired(client, monkeypatch):
+    """No refresh_token + ``token_not_valid`` 401 → AuthExpiredError, no retry loop.
+
+    This is the unrecoverable case: refresh can't help, so we fail fast and tell
+    the user to re-run ``pcxa login`` rather than surfacing a bare HTTPError
+    (commit 2bc6b46: fail fast with rc=2 on unrecoverable token expiry).
+    """
     client.profile["refresh_token"] = None
     client.session.responses = [FakeResponse(401, {"code": "token_not_valid"})]
+
+    from pcxa._api import AuthExpiredError
+    with pytest.raises(AuthExpiredError):
+        client._request("GET", "https://api.example.com/files/")
+    assert len(client.session.calls) == 1  # no retry — failed fast
+
+
+def test_401_without_token_not_valid_code_surfaces_as_httperror(client, monkeypatch):
+    """A 401 that isn't a token-validity signal surfaces as HTTPError, not
+    AuthExpiredError — refresh wouldn't help, but it's not an auth-expiry case."""
+    client.profile["refresh_token"] = None
+    client.session.responses = [FakeResponse(401, {"detail": "permission denied"})]
 
     from pcxa._http import HTTPError
     with pytest.raises(HTTPError):
