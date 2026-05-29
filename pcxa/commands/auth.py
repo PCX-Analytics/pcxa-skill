@@ -12,11 +12,50 @@ from pcxa._config import (
     get_config_file,
     load_config,
     resolve_credentials_path,
+    resolve_login_path,
     save_config,
 )
 from pcxa._http import requests
 from pcxa._api import APIClient
 from urllib.parse import parse_qs, urlparse
+
+
+def _pick_from_menu(items, kind):
+    """Pick one item from a list of ``{'id', 'name'}`` dicts.
+
+    Auto-selects when there's only one item. Returns the chosen dict, or
+    ``None`` if no choice can be made — a single ``None`` covers an empty
+    list, a non-interactive stdin (piped/agent shell), or EOF/Ctrl-C at the
+    prompt. Never raises on EOF: callers treat ``None`` as "skip", so a
+    successful login is never turned into a traceback by the picker.
+    """
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+    if not sys.stdin.isatty():
+        print(
+            f"  Multiple {kind}s available but stdin is non-interactive — "
+            f"skipping picker.",
+            file=sys.stderr,
+        )
+        return None
+    print(f"\n  Multiple {kind}s found. Select one:")
+    for i, it in enumerate(items, 1):
+        print(f"    {i}. {it.get('name', '?')} (id={it['id']})")
+    while True:
+        try:
+            choice = input(f"  Enter choice (1-{len(items)}): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  No {kind} selected — skipping.", file=sys.stderr)
+            return None
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(items):
+                return items[idx]
+        except (ValueError, IndexError):
+            pass
+        print("  Invalid choice. Try again.")
 
 
 def _setup_repo_config(api_url, access_token, username, local_path):
@@ -47,28 +86,16 @@ def _setup_repo_config(api_url, access_token, username, local_path):
         return
 
     # Select company
-    company_id = None
-    if len(companies) == 1:
-        company_id = companies[0]["id"]
-        print(f"  Company auto-detected: {companies[0].get('name', '?')} (id={company_id})")
-    else:
-        print(f"\n  Multiple companies found. Select one:")
-        for i, c in enumerate(companies, 1):
-            print(f"    {i}. {c.get('name', '?')} (id={c['id']})")
-        while True:
-            try:
-                choice = input(f"  Enter choice (1-{len(companies)}): ").strip()
-                idx = int(choice) - 1
-                if 0 <= idx < len(companies):
-                    company_id = companies[idx]["id"]
-                    print(f"  Selected: {companies[idx].get('name', '?')} (id={company_id})")
-                    break
-            except (ValueError, IndexError):
-                pass
-            print(f"  Invalid choice. Try again.")
-
-    if not company_id:
+    chosen = _pick_from_menu(companies, "company")
+    if not chosen:
+        print(
+            "  Skipped .pcxa setup — no company selected. Run "
+            "`pcxa set-project <id> --local` to pin this repo later.",
+            file=sys.stderr,
+        )
         return
+    company_id = chosen["id"]
+    print(f"  Company: {chosen.get('name', '?')} (id={company_id})")
 
     # Fetch projects in company
     try:
@@ -85,28 +112,16 @@ def _setup_repo_config(api_url, access_token, username, local_path):
         return
 
     # Select project
-    project_id = None
-    if len(projects) == 1:
-        project_id = projects[0]["id"]
-        print(f"  Project auto-detected: {projects[0].get('name', '?')} (id={project_id})")
-    else:
-        print(f"\n  Multiple projects found. Select one:")
-        for i, p in enumerate(projects, 1):
-            print(f"    {i}. {p.get('name', '?')} (id={p['id']})")
-        while True:
-            try:
-                choice = input(f"  Enter choice (1-{len(projects)}): ").strip()
-                idx = int(choice) - 1
-                if 0 <= idx < len(projects):
-                    project_id = projects[idx]["id"]
-                    print(f"  Selected: {projects[idx].get('name', '?')} (id={project_id})")
-                    break
-            except (ValueError, IndexError):
-                pass
-            print(f"  Invalid choice. Try again.")
-
-    if not project_id:
+    chosen = _pick_from_menu(projects, "project")
+    if not chosen:
+        print(
+            "  Skipped .pcxa setup — no project selected. Run "
+            "`pcxa set-project <id> --local` to pin this repo later.",
+            file=sys.stderr,
+        )
         return
+    project_id = chosen["id"]
+    print(f"  Project: {chosen.get('name', '?')} (id={project_id})")
 
     # Write to .pcxa with company, project, and user
     local_cfg["company"] = company_id
@@ -219,7 +234,8 @@ def cmd_login(args):
         print("No token received — authentication may have been cancelled.", file=sys.stderr)
         sys.exit(1)
 
-    config = load_config()
+    login_path = resolve_login_path(getattr(args, "use_global", False))
+    config = load_config(path=login_path)
     name = args.profile or "prod"
     profile = config.get("profiles", {}).get(name, {})
     profile["url"] = api_url
@@ -237,13 +253,13 @@ def cmd_login(args):
 
     config.setdefault("profiles", {})[name] = profile
     config["default_profile"] = name
-    save_config(config)
+    save_config(config, path=login_path)
 
     user_str = result.get("username") or "unknown"
     print(f"Logged in as {user_str}. Profile '{name}' saved.")
     if profile.get("company"):
         print(f"  Company ID: {profile['company']}")
-    print(f"  Config: {get_config_file()}")
+    print(f"  Config: {login_path}")
 
     # If in a git repo, auto-detect and set company/project, then write .pcxa.
     # Use existing .pcxa if found, otherwise create one at the git root.
@@ -328,7 +344,8 @@ def cmd_setup(args):
     """Profile setup and login."""
     import getpass
 
-    config = load_config()
+    login_path = resolve_login_path(getattr(args, "use_global", False))
+    config = load_config(path=login_path)
     name = args.profile or "prod"
 
     profile = config.get("profiles", {}).get(name, {})
@@ -373,13 +390,13 @@ def cmd_setup(args):
 
     config.setdefault("profiles", {})[name] = profile
     config["default_profile"] = name
-    save_config(config)
+    save_config(config, path=login_path)
 
     print(f"Profile '{name}' saved. Authenticated as {args.username}")
     print(f"  URL:     {profile['url']}")
     print(f"  Company: {profile.get('company', 'auto-detect')}")
     print(f"  Project: {profile.get('project', 'auto-detect')}")
-    print(f"  Config:  {get_config_file()}")
+    print(f"  Config:  {login_path}")
 
 
 def cmd_whoami(client, args):
@@ -509,24 +526,16 @@ def cmd_set_project(args):
             print("No projects found in this company", file=sys.stderr)
             sys.exit(1)
 
-        if len(projects) == 1:
-            project_id = projects[0]["id"]
-            print(f"Project auto-selected: {projects[0].get('name', '?')} (id={project_id})")
-        else:
-            print(f"Select project:")
-            for i, p in enumerate(projects, 1):
-                print(f"  {i}. {p.get('name', '?')} (id={p['id']})")
-            while True:
-                try:
-                    choice = input(f"Enter choice (1-{len(projects)}): ").strip()
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(projects):
-                        project_id = projects[idx]["id"]
-                        print(f"Selected: {projects[idx].get('name', '?')} (id={project_id})")
-                        break
-                except (ValueError, IndexError):
-                    pass
-                print(f"Invalid choice. Try again.")
+        chosen = _pick_from_menu(projects, "project")
+        if not chosen:
+            print(
+                "No project selected. Re-run with an explicit id: "
+                "pcxa set-project <project_id> [--local]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        project_id = chosen["id"]
+        print(f"Selected: {chosen.get('name', '?')} (id={project_id})")
 
     if getattr(args, "local", False):
         local_file = Path.cwd() / LOCAL_CONFIG_NAME
