@@ -799,16 +799,20 @@ def _multipart_presign_and_put(client, fp, *, folder, part_size, concurrency):
 
     # Backend hands back URLs for the first N parts (default 10); the
     # rest are presigned on demand via /files/multipart/presign-parts/.
+    # That endpoint caps part_numbers at 100 per request, so batch the
+    # asks — a ~1.6GB+ file at the default 16MB part size exceeds 100 parts.
     have = {int(k): v for k, v in initial_part_urls.items()}
     missing = [n for n in range(1, total_parts + 1) if n not in have]
-    if missing:
+    PRESIGN_BATCH = 100
+    for i in range(0, len(missing), PRESIGN_BATCH):
+        batch = missing[i:i + PRESIGN_BATCH]
         remaining = client._request(
             "POST",
             client._url("files/multipart/presign-parts/"),
             json={
                 "storage_key": storage_key,
                 "upload_id": upload_id,
-                "part_numbers": missing,
+                "part_numbers": batch,
             },
         ).json()
         for k, v in (remaining.get("part_urls") or {}).items():
@@ -939,6 +943,35 @@ def _upload_via_presign(client, fp, title, folder, tags, presign_url, create_url
             payload["provider_id"] = storage_ref_data["provider_id"]
 
     resp = client._request("POST", create_url, json=payload)
+    return resp.json()
+
+
+def _upload_via_multipart_presign(client, fp, title, folder, tags, *, part_size, concurrency):
+    """Large single-file path: multipart presign+PUT, then register.
+
+    Uploads the file in parallel parts via ``_multipart_presign_and_put``
+    (the same building block the batch path uses), then registers the
+    resulting storage object through POST /files/ so the call returns the
+    full File row — matching ``_upload_via_presign`` for the
+    10MB–threshold band.
+    """
+    item = _multipart_presign_and_put(
+        client, fp, folder=folder, part_size=part_size, concurrency=concurrency
+    )
+
+    payload = {
+        "title": title,
+        "original_filename": item["original_filename"],
+        "content_type": item["content_type"],
+        "file_size_input": item["file_size"],
+        "storage_key": item["storage_key"],
+    }
+    if folder:
+        payload["folder"] = folder
+    if tags:
+        payload["tags"] = tags
+
+    resp = client._request("POST", client._url("files/"), json=payload)
     return resp.json()
 
 
