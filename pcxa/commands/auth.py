@@ -141,6 +141,7 @@ def _setup_repo_config(api_url, access_token, username, local_path):
 
 def cmd_login(args):
     """Browser-based login — opens pcxa.app and captures tokens via local callback."""
+    import os
     import secrets
     import socket
     import threading
@@ -213,8 +214,21 @@ def cmd_login(args):
 
     print("Opening browser to authenticate...", flush=True)
     print(f"  If your browser does not open automatically, visit:\n  {auth_url}", flush=True)
+    # Browsers (esp. Chromium on WSL/headless) dump D-Bus/GPU warnings to the
+    # stderr they inherit from us. Point the child's stderr at /dev/null while
+    # it launches — it keeps that fd after we restore ours — so the noise stays
+    # out of the user's terminal without hiding our own diagnostics.
     try:
-        webbrowser.open(auth_url)
+        saved_stderr_fd = os.dup(2)
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        sys.stderr.flush()
+        os.dup2(devnull_fd, 2)
+        try:
+            webbrowser.open(auth_url)
+        finally:
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stderr_fd)
+            os.close(devnull_fd)
     except Exception:
         pass  # WSL / headless / no BROWSER set — URL is printed above
 
