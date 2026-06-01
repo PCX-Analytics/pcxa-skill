@@ -237,7 +237,9 @@ def cmd_activities_delete(client, args):
         print(f"Would DELETE activities {args.activity_ids}")
         return
     if len(args.activity_ids) == 1:
-        client.post(f"activities/{args.activity_ids[0]}/soft_delete/")
+        # The per-id soft_delete action is exposed as DELETE on the server
+        # (not POST) — POST returns 405 Method Not Allowed.
+        client.delete(f"activities/{args.activity_ids[0]}/soft_delete/")
         print(f"Deleted activity {args.activity_ids[0]}")
     else:
         data = client.bulk_call("activities/bulk_delete/", "activity_ids", args.activity_ids)

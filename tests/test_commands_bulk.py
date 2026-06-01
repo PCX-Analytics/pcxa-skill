@@ -227,12 +227,15 @@ def test_activities_bulk_delete_multi_routes_through_bulk_call():
 
 
 def test_activities_delete_single_uses_soft_delete_endpoint():
-    """Single delete intentionally still uses the per-id soft_delete path."""
+    """Single delete hits the per-id soft_delete action via DELETE.
+
+    The server exposes soft_delete as DELETE only; POST returns 405.
+    """
     c = FakeClient()
     cmd_activities_delete(c, _args(activity_ids=[42]))
     assert c.bulk_calls == []
-    assert c.posts == [{"path": "activities/42/soft_delete/", "payload": None}] \
-        or len(c.posts) == 1  # tolerate signature variants
+    assert c.posts == []
+    assert c.deletes == [{"path": "activities/42/soft_delete/", "json_data": None}]
 
 
 def test_activities_bulk_update_sends_updates_payload():
