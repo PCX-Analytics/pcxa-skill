@@ -264,8 +264,10 @@ def cmd_activities_bulk_update(client, args):
     if args.dry_run:
         print(f"Would BULK UPDATE {len(args.activity_ids)} activities: {updates}")
         return
+    # activities/bulk_update/ is exposed as PATCH (unlike files/bulk_update/,
+    # which takes POST) — POST returns 405 Method Not Allowed.
     data = client.bulk_call("activities/bulk_update/", "activity_ids", args.activity_ids,
-                            {"updates": updates})
+                            {"updates": updates}, method="PATCH")
     if args.format == "json":
         out_json(data)
     else:
@@ -585,7 +587,7 @@ def cmd_gantt(client, args):
     params = {}
     if args.status:
         params["status"] = args.status
-    data = client.get("activities/gantt/", params)
+    data = client.get("activities/gantt_data/", params)
     if args.format == "json":
         out_json(data)
         return

@@ -11,7 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from pcxa.commands.activities import cmd_activities_delete, cmd_activities_bulk_update
+from pcxa.commands.activities import (
+    cmd_activities_delete,
+    cmd_activities_bulk_update,
+    cmd_gantt,
+)
 from pcxa.commands.tags_folders import (
     cmd_categorize,
     cmd_files_delete,
@@ -31,6 +35,7 @@ class FakeClient:
         self.bulk_calls = []
         self.posts = []
         self.deletes = []
+        self.gets = []
         self.response = response or {"success_count": 0, "error_count": 0,
                                      "errors": [], "chunks": 0}
 
@@ -43,6 +48,10 @@ class FakeClient:
         # Drive the progress callback once so callers can be tested for it.
         if on_chunk is not None and ids:
             on_chunk(0, len(ids), len(ids), self.response)
+        return self.response
+
+    def get(self, path, params=None, project_scoped=True):
+        self.gets.append({"path": path, "params": params})
         return self.response
 
     def post(self, path, payload=None, project_scoped=True):
@@ -238,12 +247,21 @@ def test_activities_delete_single_uses_soft_delete_endpoint():
     assert c.deletes == [{"path": "activities/42/soft_delete/", "json_data": None}]
 
 
+def test_gantt_hits_gantt_data_endpoint():
+    """The server route is activities/gantt_data/ (gantt/ was removed → 404)."""
+    c = FakeClient({"results": []})
+    cmd_gantt(c, _args(status=None, format="json"))
+    assert c.gets == [{"path": "activities/gantt_data/", "params": {}}]
+
+
 def test_activities_bulk_update_sends_updates_payload():
     c = FakeClient({"success_count": 3})
     cmd_activities_bulk_update(c, _args(activity_ids=[1, 2, 3], status="done",
                                          priority=1, owner="alice"))
     call = c.bulk_calls[0]
     assert call["path"] == "activities/bulk_update/"
+    # Server exposes this action as PATCH, not POST (POST → 405).
+    assert call["method"] == "PATCH"
     assert call["base_payload"] == {
         "updates": {"status": "done", "priority": 1, "owner": "alice"}
     }
