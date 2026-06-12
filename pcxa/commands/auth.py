@@ -204,6 +204,44 @@ def cmd_login(args):
         def log_message(self, *_args):
             pass  # suppress access logs
 
+    def read_manual_callback():
+        """Populate ``result`` from a callback URL pasted on stdin.
+
+        Fallback for shells where the browser cannot reach our local server
+        (WSL2 localhost forwarding, remote SSH, etc.): the user copies the
+        ``http://127.0.0.1:<port>/callback?...`` URL their browser lands on
+        and pastes it here. Runs in a daemon thread alongside the automatic
+        HTTP callback; whichever arrives first sets ``done``. Loops on bad
+        input so a typo/partial paste doesn't burn the one attempt.
+        """
+        while not done.is_set():
+            try:
+                raw = sys.stdin.readline()
+            except Exception:
+                return
+            if raw == "":  # EOF (stdin closed)
+                return
+            line = raw.strip()
+            if not line:
+                continue
+            params = parse_qs(urlparse(line).query or line, keep_blank_values=True)
+            pasted_state = params.get("state", [""])[0]
+            if pasted_state and pasted_state != state:
+                print("  Pasted URL has a mismatched state — re-copy it from the browser.",
+                      file=sys.stderr, flush=True)
+                continue
+            access = params.get("access", [""])[0]
+            if not access:
+                print("  No 'access' token in that text — paste the full callback URL.",
+                      file=sys.stderr, flush=True)
+                continue
+            result["access"] = access
+            result["refresh"] = params.get("refresh", [""])[0]
+            result["company"] = params.get("company", [None])[0]
+            result["username"] = params.get("username", [""])[0]
+            done.set()
+            return
+
     server = HTTPServer(("127.0.0.1", port), CallbackHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -232,8 +270,28 @@ def cmd_login(args):
     except Exception:
         pass  # WSL / headless / no BROWSER set — URL is printed above
 
+    # Manual fallback: if the browser can't reach our callback server (WSL2
+    # localhost forwarding, remote SSH), let the user paste the redirect URL.
+    # Skipped when stdin isn't a TTY (agent/piped) — there we rely on the
+    # automatic callback and the timeout below.
+    if sys.stdin.isatty():
+        print(
+            f"\n  Waiting for the browser to redirect back...\n"
+            f"  If it can't reach this terminal (common on WSL/SSH), copy the URL\n"
+            f"  your browser lands on (http://127.0.0.1:{port}/callback?...) and\n"
+            f"  paste it here, then press Enter:",
+            flush=True,
+        )
+        threading.Thread(target=read_manual_callback, daemon=True).start()
+
     timeout = getattr(args, "timeout", 120) or 120
-    if not done.wait(timeout=timeout):
+    try:
+        signaled = done.wait(timeout=timeout)
+    except KeyboardInterrupt:
+        server.shutdown()
+        print("\nLogin cancelled.", file=sys.stderr)
+        sys.exit(130)
+    if not signaled:
         server.shutdown()
         print("Timed out waiting for browser authentication.", file=sys.stderr)
         sys.exit(1)

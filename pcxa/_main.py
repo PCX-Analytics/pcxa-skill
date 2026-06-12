@@ -309,6 +309,8 @@ def main():
                 cmd_projects(args)
             elif args.command == "update":
                 cmd_update(args)
+        except KeyboardInterrupt:
+            sys.exit(130)
         finally:
             if args.command != "update":
                 _print_update_notice(_check_for_update())
