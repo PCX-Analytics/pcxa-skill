@@ -1,6 +1,6 @@
 ---
 name: pcxa
-description: PCXA construction intelligence platform CLI. Search/read files, manage tags and folders, manage activities/steps/progress/dependencies, manage form templates/fields/submissions, manage resources/timesheets/cost-codes/budgets, manage entity links between objects, and chat with the project's AI assistant. Use when the user asks about project files, documents, tasks, activities, forms, resources, timesheets, entity links, project management, or wants to send messages to the AI chatbot.
+description: PCXA construction intelligence platform CLI. Search/read files, manage tags and folders, manage activities/steps/progress/dependencies, manage form templates/fields/submissions, manage custom objects (field choices) with fuzzy "did you mean?" value matching, manage resources/timesheets/cost-codes/budgets, manage entity links between objects, and chat with the project's AI assistant. Use when the user asks about project files, documents, tasks, activities, forms, custom objects, resources, timesheets, entity links, project management, or wants to send messages to the AI chatbot.
 argument-hint: <command> [options]
 user-invocable: true
 disable-model-invocation: false
@@ -179,7 +179,9 @@ pcxa activities list --created-after 2026-01-01 --created-before 2026-03-31
 pcxa activities list --assignee 5 --after 2026-03-01 --before 2026-03-31  # user's work in period
 pcxa activities get 123                                       # detail + steps + deps
 pcxa activities create --title "Review" --priority 3 --type 5 --assignees 1,2
+pcxa activities create --title "Pour slab" --custom-fields '{"3":"Acme Corp"}'  # custom-object value, fuzzy-validated
 pcxa activities update 123 --status completed --percent 100
+pcxa activities update 123 --custom-fields '{"3":"Acme Corp"}' --no-fuzzy        # write value as-is
 pcxa activities delete 123 456                                # bulk delete
 pcxa activities bulk-update 1 2 3 --status in_progress
 pcxa activities types                                         # list templates
@@ -200,6 +202,8 @@ Do NOT put in descriptions: processing details, scripts, output file lists, stat
 - Exact/substring match → resolves automatically with confirmation message
 - Multiple close matches → lists candidates with IDs for you to pick
 - No match → suggests `pcxa project members` to list all
+
+**Custom-object fields:** `--custom-fields` takes a JSON map of `{custom_field_id: value}` (custom fields are defined at the project level). Values targeting a custom-object-backed field are fuzzy-validated the same way form submissions are — see **Custom Objects**. Pass `--no-fuzzy` to write the raw value.
 
 **Invoicing workflow:** Query a user's activity in a billing period by name — no `--status` filter needed since `--after`/`--before` captures any work (started, progressed, or completed):
 ```bash
@@ -307,6 +311,47 @@ pcxa submissions delete 1 42
 ```
 
 **Statuses:** `draft`, `submitted`, `closed`. Values are JSON objects mapping field IDs to values.
+
+Values targeting a custom-object-backed field are fuzzy-validated on create/update — see **Custom Objects** below. Pass `--no-fuzzy` to skip.
+
+## Custom Objects (Field Choices)
+
+Custom objects are reusable, typed lookup tables (`field-choices` in the API). A custom object defines a `property_schema` (its columns) and holds **options** (rows), each with a `label` and a `properties` JSON of column values. Form fields can be backed by a custom object so submissions pick from its options. Objects exist at **project** (default) or **company** scope; a company object can be surfaced into a project with `extend`.
+
+```bash
+pcxa custom-objects list                                    # project-scoped objects
+pcxa custom-objects list --scope company --search vendor     # company-scoped, filtered
+pcxa custom-objects get 5                                   # schema + first options
+pcxa custom-objects create --name "Vendors" --schema '{"properties":{"code":{"type":"string"}}}'
+pcxa custom-objects create --name "Trades" --scope company --extensible true
+pcxa custom-objects update 5 --description "Approved vendor list"
+pcxa custom-objects extend 5                                # company object → current project
+pcxa custom-objects delete 5
+```
+
+### Options (rows)
+
+```bash
+pcxa custom-objects options list 5                          # rows of object 5
+pcxa custom-objects options create 5 --label "Acme Corp" --properties '{"code":"A1"}'
+pcxa custom-objects options update 5 42 --label "Acme Corporation" --order 1
+pcxa custom-objects options delete 5 42
+pcxa custom-objects options bulk-create 5 --file options.json   # [{"label":..,"properties":..}, ...]
+pcxa custom-objects options reorder 5 --order "42,17,9"      # option ids in desired order
+```
+
+Pass `--scope company` to any object/option command when the object is company-scoped.
+
+### Fuzzy matching ("did you mean?")
+
+When a value should reference a custom object, the CLI fuzzy-matches it against that object's options:
+
+```bash
+pcxa custom-objects resolve 5 "Acme Crp"
+# → No match for 'Acme Crp'. Did you mean 'Acme Corp' (option 10)?
+```
+
+`resolve` exits non-zero when there is no confident match. **Form submissions and activity custom fields run the same check automatically:** on `submissions create`/`update` with `--values` or `activities create`/`update` with `--custom-fields`, any value targeting a custom-object-backed field is validated — an exact label/id or a unique substring resolves silently; anything else blocks the write with a "Did you mean Y?" suggestion. Pass `--no-fuzzy` to write the raw value. Validation reads the field definitions (form fields, or activity custom fields at `activities/custom-fields/`) and the object's options (trying project then company scope); a permissions or network error degrades to a warning and never blocks an otherwise-valid write.
 
 ## Resources
 

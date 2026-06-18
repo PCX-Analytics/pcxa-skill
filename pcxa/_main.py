@@ -112,6 +112,16 @@ from pcxa.commands.forms import (
     cmd_submissions_list,
     cmd_submissions_update,
 )
+from pcxa.commands.custom_objects import (
+    cmd_custom_objects_create,
+    cmd_custom_objects_delete,
+    cmd_custom_objects_extend,
+    cmd_custom_objects_get,
+    cmd_custom_objects_list,
+    cmd_custom_objects_options,
+    cmd_custom_objects_resolve,
+    cmd_custom_objects_update,
+)
 from pcxa.commands.resources import (
     cmd_assignments_create,
     cmd_assignments_delete,
@@ -221,6 +231,12 @@ SUB_HANDLERS = {
         "list": cmd_submissions_list, "get": cmd_submissions_get, "create": cmd_submissions_create,
         "update": cmd_submissions_update, "delete": cmd_submissions_delete,
     },
+    "custom-objects": {
+        "list": cmd_custom_objects_list, "get": cmd_custom_objects_get,
+        "create": cmd_custom_objects_create, "update": cmd_custom_objects_update,
+        "delete": cmd_custom_objects_delete, "extend": cmd_custom_objects_extend,
+        "resolve": cmd_custom_objects_resolve, "options": cmd_custom_objects_options,
+    },
     "resources": {
         "list": cmd_resources_list, "get": cmd_resources_get, "create": cmd_resources_create,
         "update": cmd_resources_update, "delete": cmd_resources_delete,
@@ -275,6 +291,7 @@ SUB_COMMAND_KEYS = {
     "progress": "progress_command", "deps": "deps_command",
     "forms": "forms_command", "fields": "fields_command",
     "submissions": "submissions_command",
+    "custom-objects": "custom_objects_command",
     "resources": "resources_command", "rates": "rates_command",
     "assignments": "assignments_command", "cost-codes": "costcodes_command",
     "budgets": "budgets_command", "timesheets": "timesheets_command",

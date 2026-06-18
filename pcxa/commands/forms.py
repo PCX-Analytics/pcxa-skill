@@ -4,6 +4,7 @@ import json
 import sys
 
 from pcxa._output import out_json, out_table, tag_names
+from pcxa._resolve import validate_choice_field_values
 
 
 def _form_row(f):
@@ -280,6 +281,37 @@ def cmd_fields_delete(client, args):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _validate_choice_values(client, form_id, values, args):
+    """Fuzzy-validate submission values that target custom-object fields.
+
+    For each provided value whose form field is bound to a custom object
+    (FieldChoice), confirm the value matches an option. On no confident match,
+    print a "No match for X. Did you mean Y?" suggestion and block the write
+    (exit 1) unless ``--no-fuzzy`` was passed. A read error while loading the
+    fields degrades to a warning so a permissions/infra hiccup never blocks an
+    otherwise-valid submission.
+    """
+    if getattr(args, "no_fuzzy", False) or not values:
+        return
+    try:
+        fdata = client.get(f"forms/{form_id}/fields/")
+        fields = fdata.get("results", fdata) if isinstance(fdata, dict) else fdata
+    except Exception as e:
+        print(f"Note: skipped custom-object validation (could not load form fields: {e})",
+              file=sys.stderr)
+        return
+
+    problems, notes = validate_choice_field_values(client, fields, values)
+    for n in notes:
+        print(f"Note: skipped validation for {n}", file=sys.stderr)
+    if problems:
+        print("Custom-object value validation failed:", file=sys.stderr)
+        for p in problems:
+            print(f"  {p}", file=sys.stderr)
+        print("Fix the value(s), or pass --no-fuzzy to submit as-is.", file=sys.stderr)
+        sys.exit(1)
+
+
 def _submission_row(s):
     return {
         "id": str(s.get("id", "")),
@@ -401,6 +433,7 @@ def cmd_submissions_create(client, args):
     if args.dry_run:
         print(f"Would CREATE submission on form {args.form_id}: {json.dumps(payload, indent=2)}")
         return
+    _validate_choice_values(client, args.form_id, payload.get("values"), args)
     data = client.post(f"forms/{args.form_id}/submissions/", payload)
     if args.format == "json":
         out_json(data)
@@ -433,6 +466,7 @@ def cmd_submissions_update(client, args):
     if args.dry_run:
         print(f"Would UPDATE submission {args.submission_id}: {json.dumps(payload, indent=2)}")
         return
+    _validate_choice_values(client, args.form_id, payload.get("values"), args)
     data = client.patch(f"forms/{args.form_id}/submissions/{args.submission_id}/", payload)
     if args.format == "json":
         out_json(data)

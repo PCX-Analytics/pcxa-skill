@@ -7,9 +7,45 @@ from pathlib import Path
 
 from pcxa._http import requests
 from pcxa._output import out_json, out_table, tag_names
-from pcxa._resolve import resolve_member_by_name
+from pcxa._resolve import resolve_member_by_name, validate_choice_field_values
 
 PRIORITY_MAP = {0: "-", 1: "Low", 2: "Med", 3: "High", 4: "Critical"}
+
+# Payload key carrying custom-field values on an activity (keyed by custom-field
+# id). Activity custom fields are defined at ``activities/custom-fields/`` — the
+# activity analogue of a form's fields. The exact attribute couldn't be confirmed
+# on the (permission-gated) test account; it's centralized here so confirming the
+# real name is a one-line change.
+_CUSTOM_FIELDS_KEY = "custom_field_values"
+
+
+def _validate_activity_choice_values(client, values, args):
+    """Fuzzy-validate activity custom-field values against custom objects.
+
+    Mirrors form-submission validation: for each value targeting a
+    custom-object-backed activity custom field, confirm the value matches an
+    option, else block with a "Did you mean Y?" suggestion (unless ``--no-fuzzy``).
+    A read error loading the custom-field definitions degrades to a warning.
+    """
+    if getattr(args, "no_fuzzy", False) or not values:
+        return
+    try:
+        fdata = client.get("activities/custom-fields/")
+        fields = fdata.get("results", fdata) if isinstance(fdata, dict) else fdata
+    except Exception as e:
+        print(f"Note: skipped custom-object validation (could not load activity custom fields: {e})",
+              file=sys.stderr)
+        return
+
+    problems, notes = validate_choice_field_values(client, fields, values)
+    for n in notes:
+        print(f"Note: skipped validation for {n}", file=sys.stderr)
+    if problems:
+        print("Custom-object value validation failed:", file=sys.stderr)
+        for p in problems:
+            print(f"  {p}", file=sys.stderr)
+        print("Fix the value(s), or pass --no-fuzzy to write as-is.", file=sys.stderr)
+        sys.exit(1)
 
 
 def _activity_row(a):
@@ -175,10 +211,14 @@ def cmd_activities_create(client, args):
         payload["tags"] = [t.strip() for t in args.tags.split(",")]
     if args.wbs:
         payload["wbs_code"] = args.wbs
+    cf = json.loads(args.custom_fields) if getattr(args, "custom_fields", None) else None
+    if cf:
+        payload[_CUSTOM_FIELDS_KEY] = cf
 
     if args.dry_run:
         print(f"Would CREATE activity: {json.dumps(payload, indent=2)}")
         return
+    _validate_activity_choice_values(client, cf, args)
     data = client.post("activities/", payload)
     if args.format == "json":
         out_json(data)
@@ -217,6 +257,9 @@ def cmd_activities_update(client, args):
         payload["parent"] = args.parent if args.parent != 0 else None
     if args.tags:
         payload["tags"] = [t.strip() for t in args.tags.split(",")]
+    cf = json.loads(args.custom_fields) if getattr(args, "custom_fields", None) else None
+    if cf:
+        payload[_CUSTOM_FIELDS_KEY] = cf
 
     if not payload:
         print("No fields to update.", file=sys.stderr)
@@ -224,6 +267,7 @@ def cmd_activities_update(client, args):
     if args.dry_run:
         print(f"Would UPDATE activity {args.activity_id}: {json.dumps(payload, indent=2)}")
         return
+    _validate_activity_choice_values(client, cf, args)
     data = client.patch(f"activities/{args.activity_id}/", payload)
     if args.format == "json":
         out_json(data)

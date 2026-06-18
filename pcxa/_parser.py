@@ -433,6 +433,11 @@ def build_parser():
     p.add_argument("--parent", type=int)
     p.add_argument("--tags")
     p.add_argument("--wbs")
+    p.add_argument("--custom-fields", dest="custom_fields",
+                   help='Custom-field values JSON keyed by custom-field id '
+                        '(e.g. \'{"3":"Acme Corp"}\'); custom-object-backed values are fuzzy-validated')
+    p.add_argument("--no-fuzzy", dest="no_fuzzy", action="store_true",
+                   help="Skip fuzzy validation of custom-object field values (write as-is)")
 
     p = act_sub.add_parser("update", help="Update activity")
     p.add_argument("activity_id", type=int)
@@ -450,6 +455,11 @@ def build_parser():
     p.add_argument("--assignees")
     p.add_argument("--parent", type=int, help="0=root")
     p.add_argument("--tags")
+    p.add_argument("--custom-fields", dest="custom_fields",
+                   help='Custom-field values JSON keyed by custom-field id '
+                        '(custom-object-backed values are fuzzy-validated)')
+    p.add_argument("--no-fuzzy", dest="no_fuzzy", action="store_true",
+                   help="Skip fuzzy validation of custom-object field values (write as-is)")
 
     p = act_sub.add_parser("delete", help="Delete activities")
     p.add_argument("activity_ids", nargs="+", type=int)
@@ -644,6 +654,8 @@ def build_parser():
     p.add_argument("--private", action="store_true")
     p.add_argument("--tags")
     p.add_argument("--location-name", dest="location_name")
+    p.add_argument("--no-fuzzy", dest="no_fuzzy", action="store_true",
+                   help="Skip fuzzy validation of custom-object field values (submit as-is)")
 
     p = subs_sub.add_parser("update", help="Update submission")
     p.add_argument("form_id", type=int)
@@ -656,10 +668,113 @@ def build_parser():
     p.add_argument("--private", type=lambda x: x.lower() in ("true", "1", "yes"), metavar="BOOL")
     p.add_argument("--tags", help="Tags (comma-sep, empty=clear)")
     p.add_argument("--location-name", dest="location_name")
+    p.add_argument("--no-fuzzy", dest="no_fuzzy", action="store_true",
+                   help="Skip fuzzy validation of custom-object field values (submit as-is)")
 
     p = subs_sub.add_parser("delete", help="Delete submission")
     p.add_argument("form_id", type=int)
     p.add_argument("submission_id", type=int)
+
+    # ── custom-objects (FieldChoice + FieldChoiceOption) ──
+    co_p = sub.add_parser(
+        "custom-objects",
+        help="Custom object management (field-choices) + fuzzy option lookup",
+    )
+    co_sub = co_p.add_subparsers(dest="custom_objects_command")
+
+    def _add_scope(p):
+        p.add_argument("--scope", choices=["project", "company"], default="project",
+                       help="Object scope (default: project)")
+
+    p = co_sub.add_parser("list", help="List custom objects")
+    p.add_argument("--search", "-s")
+    p.add_argument("--sort", default="-created_at")
+    p.add_argument("--limit", type=int, default=25)
+    p.add_argument("--offset", type=int, default=0)
+    _add_scope(p)
+
+    p = co_sub.add_parser("get", help="Custom object detail (schema + options)")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    _add_scope(p)
+
+    p = co_sub.add_parser("create", help="Create custom object")
+    p.add_argument("--name", required=True)
+    p.add_argument("--description")
+    p.add_argument("--schema",
+                   help='property_schema JSON (e.g. \'{"properties":{"code":{"type":"string"}}}\')')
+    p.add_argument("--extensible", type=lambda x: x.lower() in ("true", "1", "yes"), metavar="BOOL",
+                   help="Allow projects to extend this company object")
+    _add_scope(p)
+
+    p = co_sub.add_parser("update", help="Update custom object")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("--name")
+    p.add_argument("--description")
+    p.add_argument("--schema", help="property_schema JSON (empty string clears)")
+    p.add_argument("--extensible", type=lambda x: x.lower() in ("true", "1", "yes"), metavar="BOOL")
+    _add_scope(p)
+
+    p = co_sub.add_parser("delete", help="Delete custom object")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    _add_scope(p)
+
+    p = co_sub.add_parser("extend", help="Extend a company custom object into the current project")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+
+    p = co_sub.add_parser("resolve",
+                          help="Fuzzy-match a value to an option ('No match for X. Did you mean Y?')")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("query", help="Value to fuzzy-match against the object's options")
+    _add_scope(p)
+
+    # nested third level: `custom-objects options <subcommand>`
+    opts_p = co_sub.add_parser("options", help="Manage options (rows) of a custom object")
+    opts_sub = opts_p.add_subparsers(dest="co_options_command")
+
+    p = opts_sub.add_parser("list", help="List options of a custom object")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("--search", "-s")
+    p.add_argument("--active", type=lambda x: x.lower() in ("true", "1", "yes"), metavar="BOOL")
+    _add_scope(p)
+
+    p = opts_sub.add_parser("get", help="Option detail")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("option_id", type=int, help="Option (row) id")
+    _add_scope(p)
+
+    p = opts_sub.add_parser("create", help="Create an option (row)")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("--label", required=True)
+    p.add_argument("--description")
+    p.add_argument("--order", type=int)
+    p.add_argument("--properties", help='Property values JSON (e.g. \'{"code":"A1"}\')')
+    p.add_argument("--active", type=lambda x: x.lower() in ("true", "1", "yes"), metavar="BOOL")
+    _add_scope(p)
+
+    p = opts_sub.add_parser("update", help="Update an option (row)")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("option_id", type=int, help="Option (row) id")
+    p.add_argument("--label")
+    p.add_argument("--description")
+    p.add_argument("--order", type=int)
+    p.add_argument("--properties", help="Property values JSON")
+    p.add_argument("--active", type=lambda x: x.lower() in ("true", "1", "yes"), metavar="BOOL")
+    _add_scope(p)
+
+    p = opts_sub.add_parser("delete", help="Delete an option (row)")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("option_id", type=int, help="Option (row) id")
+    _add_scope(p)
+
+    p = opts_sub.add_parser("bulk-create", help="Bulk-create options from a JSON file")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("--file", required=True, help="JSON list of option objects (or {\"options\":[...]})")
+    _add_scope(p)
+
+    p = opts_sub.add_parser("reorder", help="Reorder options (comma-sep option ids, in order)")
+    p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
+    p.add_argument("--order", required=True, help="Option ids in desired order, comma-separated")
+    _add_scope(p)
 
     # ── resources ──
     res_p = sub.add_parser("resources", help="Resource management")
