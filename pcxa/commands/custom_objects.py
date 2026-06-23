@@ -22,6 +22,34 @@ def _scoped(args):
     return getattr(args, "scope", "project") != "company"
 
 
+def _normalize_property_schema(value):
+    """Coerce a property_schema value to the API's canonical list shape.
+
+    The backend stores ``property_schema`` as a list of column definitions::
+
+        [{"name": "code", "type": "text"}]
+
+    Earlier docs/examples used a JSON-schema object form
+    (``{"properties": {"code": {"type": "text"}}}``) that the web app cannot
+    render and the API now rejects. Accept either form here and always send the
+    list form so every consumer receives a consistent, supported shape. Other
+    shapes pass through unchanged for the API to validate.
+    """
+    if isinstance(value, dict):
+        props = value.get("properties")
+        if isinstance(props, dict):
+            normalized = []
+            for name, spec in props.items():
+                entry = dict(spec) if isinstance(spec, dict) else {}
+                entry.setdefault("name", name)
+                entry.setdefault("type", "text")
+                normalized.append(entry)
+            return normalized
+        if not value:
+            return []
+    return value
+
+
 def _object_row(o):
     schema = o.get("property_schema") or {}
     props = schema.get("properties", schema) if isinstance(schema, dict) else {}
@@ -107,7 +135,7 @@ def cmd_custom_objects_create(client, args):
     if args.description:
         payload["description"] = args.description
     if args.schema:
-        payload["property_schema"] = json.loads(args.schema)
+        payload["property_schema"] = _normalize_property_schema(json.loads(args.schema))
     if args.extensible is not None:
         payload["is_extensible"] = args.extensible
 
@@ -129,7 +157,9 @@ def cmd_custom_objects_update(client, args):
     if args.description is not None:
         payload["description"] = args.description or None
     if args.schema is not None:
-        payload["property_schema"] = json.loads(args.schema) if args.schema else {}
+        payload["property_schema"] = (
+            _normalize_property_schema(json.loads(args.schema)) if args.schema else []
+        )
     if args.extensible is not None:
         payload["is_extensible"] = args.extensible
     if not payload:

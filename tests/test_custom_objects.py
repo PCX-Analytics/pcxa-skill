@@ -22,10 +22,12 @@ from pcxa.commands.activities import (
     cmd_activities_create,
 )
 from pcxa.commands.custom_objects import (
+    _normalize_property_schema,
     cmd_co_options_bulk_create,
     cmd_co_options_create,
     cmd_custom_objects_create,
     cmd_custom_objects_extend,
+    cmd_custom_objects_update,
 )
 from pcxa.commands.forms import _validate_choice_values
 
@@ -126,6 +128,10 @@ class RecClient:
         self.posts.append({"path": path, "payload": json_data, "project_scoped": project_scoped})
         return self.resp
 
+    def patch(self, path, json_data=None, project_scoped=True):
+        self.posts.append({"path": path, "payload": json_data, "project_scoped": project_scoped})
+        return self.resp
+
 
 def _args(**kw):
     d = {"dry_run": False, "format": "json", "scope": "project",
@@ -152,6 +158,52 @@ def test_create_company_scope_omits_project():
     assert call["project_scoped"] is False
     assert "project" not in call["payload"]
     assert call["payload"]["company"] == 3
+
+
+# property_schema is sent in the backend's canonical list shape (issue #5)
+
+def test_create_normalizes_object_form_schema_to_list():
+    c = RecClient()
+    cmd_custom_objects_create(
+        c, _args(name="Vendors", schema='{"properties":{"code":{"type":"text"}}}')
+    )
+    assert c.posts[0]["payload"]["property_schema"] == [{"name": "code", "type": "text"}]
+
+
+def test_create_passes_list_form_schema_through():
+    c = RecClient()
+    cmd_custom_objects_create(
+        c, _args(name="Vendors", schema='[{"name":"code","type":"text"}]')
+    )
+    assert c.posts[0]["payload"]["property_schema"] == [{"name": "code", "type": "text"}]
+
+
+def test_update_clear_schema_sends_empty_list():
+    c = RecClient()
+    cmd_custom_objects_update(c, _args(object_id=5, schema=""))
+    assert c.posts[0]["payload"]["property_schema"] == []
+
+
+def test_update_normalizes_object_form_schema_to_list():
+    c = RecClient()
+    cmd_custom_objects_update(
+        c, _args(object_id=5, schema='{"properties":{"tier":{"type":"text"}}}')
+    )
+    assert c.posts[0]["payload"]["property_schema"] == [{"name": "tier", "type": "text"}]
+
+
+def test_normalize_property_schema_helper():
+    assert _normalize_property_schema([{"name": "a", "type": "text"}]) == [
+        {"name": "a", "type": "text"}
+    ]
+    assert _normalize_property_schema({"properties": {"a": {"type": "number"}}}) == [
+        {"name": "a", "type": "number"}
+    ]
+    assert _normalize_property_schema({}) == []
+    # missing inner type defaults to text
+    assert _normalize_property_schema({"properties": {"a": {}}}) == [
+        {"name": "a", "type": "text"}
+    ]
 
 
 def test_extend_uses_company_scope_and_project_payload():
