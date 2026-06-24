@@ -661,7 +661,11 @@ def build_parser():
     p.add_argument("form_id", type=int)
     p.add_argument("submission_id", type=int)
     p.add_argument("--code")
-    p.add_argument("--values", help="JSON field values")
+    p.add_argument("--values", help="JSON field values. NOTE: by default this REPLACES the "
+                                    "entire values dict; pass --merge to update only the keys given")
+    p.add_argument("--merge", "--patch", dest="merge", action="store_true",
+                   help="Merge --values into the submission's existing field values "
+                        "(only the keys you pass change) instead of replacing the whole dict")
     p.add_argument("--owner", type=int, help="Owner user ID (0=clear)")
     p.add_argument("--assignees", help="User IDs (comma-sep, empty=clear)")
     p.add_argument("--distribution", help="Distribution list IDs (comma-sep, empty=clear)")

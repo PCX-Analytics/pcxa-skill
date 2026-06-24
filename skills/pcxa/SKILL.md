@@ -306,11 +306,13 @@ pcxa submissions list --form 1                        # list for a specific form
 pcxa submissions list --status draft                  # filter by status
 pcxa submissions get 1 42                             # detail (form_id submission_id)
 pcxa submissions create 1 --code SI-001 --values '{"1":"John","2":"2026-03-24","3":"High"}'
-pcxa submissions update 1 42 --values '{"3":"Critical"}' --tags urgent
+pcxa submissions update 1 42 --values '{"3":"Critical"}' --merge --tags urgent  # change only field 3
 pcxa submissions delete 1 42
 ```
 
 **Statuses:** `draft`, `submitted`, `closed`. Values are JSON objects mapping field IDs to values.
+
+> ⚠️ **`update --values` replaces the entire values dict by default.** Passing a partial `--values` (e.g. just `{"3":"Critical"}`) clears every other field on the submission. Pass **`--merge`** (alias `--patch`) to update only the keys you supply, leaving the rest intact. Without `--merge` the CLI prints a one-line overwrite warning to stderr.
 
 Values targeting a custom-object-backed field are fuzzy-validated on create/update — see **Custom Objects** below. Pass `--no-fuzzy` to skip.
 

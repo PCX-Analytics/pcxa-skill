@@ -445,7 +445,20 @@ def cmd_submissions_update(client, args):
     """Update a form submission."""
     payload = {}
     if args.values:
-        payload["values"] = json.loads(args.values)
+        new_values = json.loads(args.values)
+        if getattr(args, "merge", False):
+            # GET current values and update only the provided keys, so callers
+            # don't have to resend the whole dict (the API replaces `values`
+            # wholesale on PATCH — a partial --values without --merge wipes the rest).
+            current = client.get(f"forms/{args.form_id}/submissions/{args.submission_id}/")
+            merged = dict(current.get("values") or {})
+            merged.update(new_values)
+            payload["values"] = merged
+        else:
+            print("warning: --values REPLACES the entire field-values dict "
+                  f"({len(new_values)} key(s) given); any other fields will be cleared. "
+                  "Use --merge to update only these keys.", file=sys.stderr)
+            payload["values"] = new_values
     if args.code:
         payload["code"] = args.code
     if args.owner is not None:
