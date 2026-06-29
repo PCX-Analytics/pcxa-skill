@@ -318,13 +318,13 @@ Values targeting a custom-object-backed field are fuzzy-validated on create/upda
 
 ## Custom Objects (Field Choices)
 
-Custom objects are reusable, typed lookup tables (`field-choices` in the API). A custom object defines a `property_schema` (its columns) and holds **options** (rows), each with a `label` and a `properties` JSON of column values. Form fields can be backed by a custom object so submissions pick from its options. Objects exist at **project** (default) or **company** scope; a company object can be surfaced into a project with `extend`.
+Custom objects are reusable, typed lookup tables (`field-choices` in the API). A custom object defines a `property_schema` (its columns — a JSON **list** of `{"name", "type"}` objects) and holds **options** (rows), each with a `label` and a `properties` JSON of column values. Form fields can be backed by a custom object so submissions pick from its options. Objects exist at **project** (default) or **company** scope; a company object can be surfaced into a project with `extend`.
 
 ```bash
 pcxa custom-objects list                                    # project-scoped objects
 pcxa custom-objects list --scope company --search vendor     # company-scoped, filtered
 pcxa custom-objects get 5                                   # schema + first options
-pcxa custom-objects create --name "Vendors" --schema '{"properties":{"code":{"type":"string"}}}'
+pcxa custom-objects create --name "Vendors" --schema '[{"name":"code","type":"text"}]'
 pcxa custom-objects create --name "Trades" --scope company --extensible true
 pcxa custom-objects update 5 --description "Approved vendor list"
 pcxa custom-objects extend 5                                # company object → current project

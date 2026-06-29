@@ -705,7 +705,8 @@ def build_parser():
     p.add_argument("--name", required=True)
     p.add_argument("--description")
     p.add_argument("--schema",
-                   help='property_schema JSON (e.g. \'{"properties":{"code":{"type":"string"}}}\')')
+                   help='property_schema JSON: a list of column defs '
+                        '(e.g. \'[{"name":"code","type":"text"}]\')')
     p.add_argument("--extensible", type=lambda x: x.lower() in ("true", "1", "yes"), metavar="BOOL",
                    help="Allow projects to extend this company object")
     _add_scope(p)
@@ -714,7 +715,7 @@ def build_parser():
     p.add_argument("object_id", type=int, help="Custom object (field-choice) id")
     p.add_argument("--name")
     p.add_argument("--description")
-    p.add_argument("--schema", help="property_schema JSON (empty string clears)")
+    p.add_argument("--schema", help="property_schema JSON list (empty string clears)")
     p.add_argument("--extensible", type=lambda x: x.lower() in ("true", "1", "yes"), metavar="BOOL")
     _add_scope(p)
 
