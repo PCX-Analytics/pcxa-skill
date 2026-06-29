@@ -601,12 +601,19 @@ def build_parser():
     p = fields_sub.add_parser("create", help="Create field on form")
     p.add_argument("form_id", type=int)
     p.add_argument("--label", required=True)
-    p.add_argument("--type", dest="field_type", required=True, help="text, textarea, date, select, checkbox, number, email, phone, url, file, signature, etc.")
+    p.add_argument("--type", dest="field_type", required=True, help="text, textarea, number, date, datetime, checkbox, select, radio, choice, table, photo, file, location")
     p.add_argument("--required", action="store_true")
     p.add_argument("--order", type=int)
     p.add_argument("--placeholder")
     p.add_argument("--help-text", dest="help_text")
-    p.add_argument("--options", help='JSON options (e.g. \'{"choices":["A","B","C"]}\')')
+    p.add_argument("--options", help='Simple choice list for select/radio/choice (e.g. \'["Low","Med","High"]\')')
+    p.add_argument("--choice-id", dest="choice_id", type=int,
+                   help="Bind field to a custom object (field-choice) id; use with --type choice")
+    p.add_argument("--table-schema", dest="table_schema",
+                   help='Column definitions for --type table (JSON array, e.g. '
+                        '\'[{"name":"item","field_type":"text","label":"Item"},{"name":"qty","field_type":"number","label":"Qty"}]\')')
+    p.add_argument("--min-rows", dest="min_rows", type=int, help="Minimum rows for a table field")
+    p.add_argument("--max-rows", dest="max_rows", type=int, help="Maximum rows for a table field")
     p.add_argument("--column-span", dest="column_span", type=int)
     p.add_argument("--section", type=int, help="Section ID")
 
@@ -619,7 +626,13 @@ def build_parser():
     p.add_argument("--order", type=int)
     p.add_argument("--placeholder")
     p.add_argument("--help-text", dest="help_text")
-    p.add_argument("--options", help="JSON options")
+    p.add_argument("--options", help="Simple choice list JSON for select/radio/choice")
+    p.add_argument("--choice-id", dest="choice_id", type=int,
+                   help="Bind field to a custom object (field-choice) id")
+    p.add_argument("--table-schema", dest="table_schema",
+                   help="Column definitions for a table field (JSON array)")
+    p.add_argument("--min-rows", dest="min_rows", type=int, help="Minimum rows for a table field")
+    p.add_argument("--max-rows", dest="max_rows", type=int, help="Maximum rows for a table field")
     p.add_argument("--column-span", dest="column_span", type=int)
 
     p = fields_sub.add_parser("delete", help="Delete form field")

@@ -7,6 +7,38 @@ from pcxa._output import out_json, out_table, tag_names
 from pcxa._resolve import validate_choice_field_values
 
 
+def _field_options_summary(f):
+    """One-line summary of a field's options/columns/binding for display.
+
+    Handles the three shapes a field carries: a ``table_schema`` column list
+    (table fields), a custom-object binding (``choice_id``, the live key;
+    ``field_choice_id`` tolerated as a fallback), and a choice list in
+    ``options`` (select/radio). The API returns ``options`` as a
+    ``{"choices": [...]}`` dict; a bare ``["A","B"]`` list is tolerated for
+    display robustness.
+    """
+    cols = f.get("table_schema")
+    if isinstance(cols, list) and cols:
+        names = [str(c.get("name") or c.get("label") or c) for c in cols]
+        summary = "cols: " + ", ".join(names[:4])
+        if len(names) > 4:
+            summary += f" (+{len(names)-4})"
+        return summary
+
+    choice_id = f.get("field_choice_id") or f.get("choice_id")
+    if choice_id:
+        return f"custom-object {choice_id}"
+
+    opts = f.get("options")
+    choices = opts.get("choices", []) if isinstance(opts, dict) else (opts if isinstance(opts, list) else [])
+    if choices:
+        summary = ", ".join(str(c) for c in choices[:4])
+        if len(choices) > 4:
+            summary += f" (+{len(choices)-4})"
+        return summary
+    return ""
+
+
 def _form_row(f):
     return {
         "id": str(f.get("id", "")),
@@ -80,11 +112,8 @@ def cmd_forms_get(client, args):
             print(f"\n  Fields ({len(fields)}):")
             for f in fields:
                 req = "*" if f.get("is_required") else " "
-                opts = ""
-                if f.get("options"):
-                    choices = f["options"].get("choices", [])
-                    if choices:
-                        opts = f" [{', '.join(str(c) for c in choices[:5])}]"
+                summary = _field_options_summary(f)
+                opts = f" [{summary}]" if summary else ""
                 print(f"    {req} {f.get('order', '-'):>2}. [{f.get('id')}] {f.get('label')} ({f.get('field_type')}){opts}")
     except Exception:
         pass
@@ -188,20 +217,13 @@ def cmd_fields_list(client, args):
     results = data.get("results", data) if isinstance(data, dict) else data
     rows = []
     for f in results:
-        opts = ""
-        if f.get("options"):
-            choices = f["options"].get("choices", [])
-            if choices:
-                opts = ", ".join(str(c) for c in choices[:4])
-                if len(choices) > 4:
-                    opts += f" (+{len(choices)-4})"
         rows.append({
             "id": str(f.get("id", "")),
             "order": str(f.get("order", "")),
             "label": str(f.get("label", ""))[:35],
             "type": f.get("field_type", ""),
             "req": "yes" if f.get("is_required") else "",
-            "options": opts[:30],
+            "options": _field_options_summary(f)[:30],
         })
     print(f"Fields for form {args.form_id}: {len(rows)}\n")
     out_table(rows, ["id", "order", "label", "type", "req", "options"])
@@ -220,10 +242,27 @@ def cmd_fields_create(client, args):
         payload["help_text"] = args.help_text
     if args.options:
         payload["options"] = json.loads(args.options)
+    if getattr(args, "choice_id", None) is not None:
+        payload["choice_id"] = args.choice_id
+    if getattr(args, "table_schema", None):
+        payload["table_schema"] = json.loads(args.table_schema)
+    if getattr(args, "min_rows", None) is not None:
+        payload["min_rows"] = args.min_rows
+    if getattr(args, "max_rows", None) is not None:
+        payload["max_rows"] = args.max_rows
     if args.column_span is not None:
         payload["column_span"] = args.column_span
     if args.section is not None:
         payload["section_id"] = args.section
+
+    # A table field's columns live in `table_schema`, not `options`. The API
+    # silently accepts a column blob crammed into `options`, but the forms UI
+    # reads `table_schema` — so the field would render with no columns. Warn
+    # rather than block (the field may be defined in a follow-up update).
+    if args.field_type == "table" and "table_schema" not in payload:
+        print("warning: --type table without --table-schema; columns must be set via "
+              "--table-schema (a JSON array), not --options, or the field renders empty.",
+              file=sys.stderr)
 
     if args.dry_run:
         print(f"Would CREATE field on form {args.form_id}: {json.dumps(payload, indent=2)}")
@@ -252,6 +291,14 @@ def cmd_fields_update(client, args):
         payload["help_text"] = args.help_text
     if args.options:
         payload["options"] = json.loads(args.options)
+    if getattr(args, "choice_id", None) is not None:
+        payload["choice_id"] = args.choice_id
+    if getattr(args, "table_schema", None):
+        payload["table_schema"] = json.loads(args.table_schema)
+    if getattr(args, "min_rows", None) is not None:
+        payload["min_rows"] = args.min_rows
+    if getattr(args, "max_rows", None) is not None:
+        payload["max_rows"] = args.max_rows
     if args.column_span is not None:
         payload["column_span"] = args.column_span
     if not payload:

@@ -146,12 +146,13 @@ def resolve_field_choice_option(client, object_id, query, scope="project", optio
     return None, f"No match for '{q}'. Did you mean '{best.get('label')}' (option {best.get('id')})?"
 
 
-# Candidate attribute names a form field may use to bind to a FieldChoice
-# (custom object). The exact name couldn't be confirmed against the live API
-# (the test account is permission-gated off field-choices/ and forms/), so we
-# check the documented candidates and fall back to scanning the `options` blob.
+# Attribute names a form field may use to bind to a FieldChoice (custom object).
+# Confirmed against the live API: ``forms/{id}/fields/`` returns the binding as
+# ``choice_id`` (the write key on create/update is also ``choice_id``). The
+# remaining names are kept as tolerant fallbacks for other serializers
+# (activity custom fields, future API revisions) and the ``options`` blob.
 _FIELD_CHOICE_KEYS = (
-    "field_choice", "field_choice_id", "choice_set", "choice_set_id",
+    "choice_id", "field_choice", "field_choice_id", "choice_set", "choice_set_id",
     "custom_object", "custom_object_id",
 )
 

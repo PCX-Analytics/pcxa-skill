@@ -291,11 +291,33 @@ pcxa fields list 1                                    # list fields for form 1
 pcxa fields create 1 --label "Inspector" --type text --required --order 1
 pcxa fields create 1 --label "Severity" --type select --options '{"choices":["Low","Med","High"]}'
 pcxa fields create 1 --label "Date" --type date --required --order 2
+pcxa fields create 1 --label "Vendor" --type choice --choice-id 21      # custom-object-backed
 pcxa fields update 1 5 --label "New Label" --required true
 pcxa fields delete 1 5
 ```
 
-**Field types:** `text`, `textarea`, `date`, `select`, `checkbox`, `number`, `email`, `phone`, `url`, `file`, `signature`, etc.
+**Field types** (exact set): `text`, `textarea`, `number`, `date`, `datetime`, `checkbox`, `select`, `radio`, `choice`, `table`, `photo`, `file`, `location`.
+- `select`/`radio`: inline options via `--options '{"choices":["A","B"]}'`.
+- `choice`: backed by a **custom object** (field-choice) — bind with `--choice-id <object_id>`; submission values are fuzzy-validated (see **Custom Objects**).
+- `table`: a repeating grid of typed columns — see **Table fields** below.
+
+### Table fields
+
+A `table` field holds a list of rows, each with the same typed columns. **The columns go in `table_schema` (a JSON array), NOT `--options`** — the CLI exposes a dedicated `--table-schema` flag for this. `--options` is silently accepted by the API but ignored by the forms UI, so a table defined via `--options` renders with no columns.
+
+```bash
+pcxa fields create 1 --label "Line Items" --type table --required \
+  --table-schema '[
+    {"name":"item","field_type":"text","label":"Item"},
+    {"name":"qty","field_type":"number","label":"Qty"},
+    {"name":"unit","field_type":"select","label":"Unit","options":["ea","lf","sf"]}
+  ]' \
+  --min-rows 1 --max-rows 20
+```
+
+- Each column needs a **`name`** (the key used in submission values), a **`field_type`**, and a **`label`**. Column `name` keys must be stable — submission row values are keyed by them.
+- `--min-rows` / `--max-rows` bound the row count (optional).
+- `pcxa fields list 1` and `pcxa forms get 1` show a table field's columns (`cols: item, qty, …`) and a choice field's binding (`custom-object 21`).
 
 ## Submissions (Form Submissions)
 
@@ -310,11 +332,28 @@ pcxa submissions update 1 42 --values '{"3":"Critical"}' --merge --tags urgent  
 pcxa submissions delete 1 42
 ```
 
-**Statuses:** `draft`, `submitted`, `closed`. Values are JSON objects mapping field IDs to values.
+**Statuses:** `draft`, `submitted`, `closed`. `--values` is a JSON object mapping **field ID → value**. The value shape depends on the field type:
+
+| Field type | Value shape | Example (`"3"` = field ID) |
+|---|---|---|
+| text/number/date/select/radio/choice | scalar | `{"3":"High"}`, `{"3":42}` |
+| checkbox | boolean | `{"3":true}` |
+| table | **array of row objects keyed by column `name`** | `{"3":[{"item":"Rebar","qty":50},{"item":"Concrete","qty":12}]}` |
+
+For a **table** field, each row is an object whose keys are the column `name`s from the field's `table_schema`. Example creating a submission with a 2-row table in field `7`:
+
+```bash
+pcxa submissions create 1 --code SI-002 \
+  --values '{"7":[{"item":"Rebar","qty":50,"unit":"lf"},{"item":"Concrete","qty":12,"unit":"sf"}]}'
+```
+
+> ⚠️ **The API does NOT validate value shapes.** It accepts a wrong shape (a scalar where a table is expected, rows keyed by the wrong names, a `{"rows":[…]}` wrapper, etc.) without error — but the forms UI then renders the field broken. Match the field type and the column `name`s exactly. Use `pcxa fields list <form_id>` to confirm a table field's columns before submitting.
 
 > ⚠️ **`update --values` replaces the entire values dict by default.** Passing a partial `--values` (e.g. just `{"3":"Critical"}`) clears every other field on the submission. Pass **`--merge`** (alias `--patch`) to update only the keys you supply, leaving the rest intact. Without `--merge` the CLI prints a one-line overwrite warning to stderr.
+>
+> **`--merge` works at field-ID granularity only — it cannot merge *within* a table value.** To change one cell or add one row, resend the field's **entire** row array: `pcxa submissions get` the current value, edit the array, and send it back under that field's key with `--merge`.
 
-Values targeting a custom-object-backed field are fuzzy-validated on create/update — see **Custom Objects** below. Pass `--no-fuzzy` to skip.
+Values targeting a custom-object-backed (`choice`) field are fuzzy-validated on create/update — see **Custom Objects** below. Pass `--no-fuzzy` to skip. (Custom-object columns *inside* a table row are not yet fuzzy-validated — verify those values against the object's options yourself.)
 
 ## Custom Objects (Field Choices)
 
