@@ -497,6 +497,8 @@ pcxa links bulk --file links.json                     # bulk create from JSON
 
 The `--type` flag sets the description field (the backend doesn't enforce typed relationships). Use `--description` for longer context. Both shorthand (`"source": "file:123"`) and explicit (`"source_type": "file", "source_id": 123`) formats work in bulk JSON.
 
+`links bulk` calls the server-side bulk endpoint (up to 500 links per request, auto-chunked for larger files) instead of one request per link — rows are validated independently server-side, so one bad row doesn't fail the batch. Output reports `created`, `exists` (already-present links, not an error), and `failed` (per-row errors with the row index).
+
 ## AI Chat
 
 Send messages to the project's AI assistant and read back its replies. Useful for ad-hoc probing and for letting an agent evaluate chatbot response quality. Project-scoped — uses the `.pcxa` company/project.

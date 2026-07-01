@@ -79,8 +79,17 @@ def cmd_links_delete(client, args):
     print(f"Deleted link {args.link_id}")
 
 
+# Server-side cap on POST /api/generic-links/create-attachment/bulk/
+# (GenericLinkViewSet.MAX_BULK_LINKS in the API) — chunk client-side to match.
+MAX_BULK_LINKS = 500
+# Bulk create does per-row content-type/permission validation before the
+# single INSERT, so a full 500-row chunk needs more than the default 30s
+# (same reasoning as the bulk-register timeout bump in #554).
+BULK_LINKS_TIMEOUT = 180
+
+
 def cmd_links_bulk(client, args):
-    """Bulk create links from a JSON file."""
+    """Bulk create links from a JSON file via the server-side bulk endpoint."""
     file_path = Path(args.file)
     if not file_path.exists():
         print(f"File not found: {file_path}", file=sys.stderr)
@@ -98,8 +107,13 @@ def cmd_links_bulk(client, args):
         print("JSON file must contain a list or an object with a 'links' key.", file=sys.stderr)
         sys.exit(1)
 
-    created = 0
-    errors = []
+    if not links:
+        print("No links to create.", file=sys.stderr)
+        sys.exit(1)
+
+    rows = []
+    row_labels = []
+    parse_errors = []
     for i, link in enumerate(links):
         # Support both "source": "file:123" shorthand and explicit "source_type"/"source_id" fields
         if "source" in link and isinstance(link["source"], str):
@@ -115,7 +129,7 @@ def cmd_links_bulk(client, args):
             tgt_id = link.get("target_id")
 
         if not all([src_type, src_id, tgt_type, tgt_id]):
-            errors.append(f"[{i}] Missing source/target fields")
+            parse_errors.append(f"[{i}] Missing source/target fields")
             continue
 
         description = link.get("description") or link.get("type") or ""
@@ -127,25 +141,41 @@ def cmd_links_bulk(client, args):
         }
         if description:
             payload["description"] = description
-
-        if args.dry_run:
-            print(f"  [{i}] Would CREATE: {src_type}:{src_id} -> {tgt_type}:{tgt_id} ({description})")
-            continue
-
-        try:
-            resp = client._request("POST", links_url(client, "create-attachment/"), json=payload)
-            data = resp.json()
-            created += 1
-            if args.format != "json":
-                print(f"  [{i}] Created link {data.get('id')}: {src_type}:{src_id} -> {tgt_type}:{tgt_id}")
-        except Exception as e:
-            errors.append(f"[{i}] {src_type}:{src_id} -> {tgt_type}:{tgt_id}: {e}")
+        rows.append(payload)
+        row_labels.append(f"{src_type}:{src_id} -> {tgt_type}:{tgt_id}")
 
     if args.dry_run:
-        print(f"\nDry run: {len(links)} links would be created")
+        for i, payload in enumerate(rows):
+            print(f"  [{i}] Would CREATE: {row_labels[i]} ({payload.get('description', '')})")
+        print(f"\nDry run: {len(rows)} links would be created")
+        if parse_errors:
+            print("\nSkipped (parse errors):")
+            for err in parse_errors:
+                print(f"  {err}")
+        return
+
+    created = 0
+    exists = 0
+    failed = list(parse_errors)
+    for offset in range(0, len(rows), MAX_BULK_LINKS):
+        chunk = rows[offset:offset + MAX_BULK_LINKS]
+        resp = client._request(
+            "POST", links_url(client, "create-attachment/bulk/"),
+            json=chunk, timeout=BULK_LINKS_TIMEOUT,
+        )
+        data = resp.json()
+        created += data.get("created", 0)
+        exists += data.get("exists", 0)
+        for f in data.get("failed", []):
+            idx = offset + f.get("index", -1)
+            label = row_labels[idx] if 0 <= idx < len(row_labels) else "?"
+            failed.append(f"[{idx}] {label}: {f.get('error', 'unknown error')}")
+
+    if args.format == "json":
+        out_json({"created": created, "exists": exists, "failed": failed})
     else:
-        print(f"\nBulk complete: {created} created, {len(errors)} errors")
-    if errors:
-        print("\nErrors:")
-        for err in errors:
-            print(f"  {err}")
+        print(f"Bulk complete: {created} created, {exists} already existed, {len(failed)} failed")
+        if failed:
+            print("\nFailed:")
+            for err in failed:
+                print(f"  {err}")
