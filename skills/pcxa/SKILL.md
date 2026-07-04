@@ -155,6 +155,8 @@ pcxa tags list                                                # all tags with co
 pcxa tags add 1 2 3 --tags urgent,review                      # add (preserves existing)
 pcxa tags remove 1 2 --tags draft                             # remove specific tags
 pcxa tags set 1 2 --tags final,approved                       # replace all tags
+pcxa tags bulk --file plan.json                               # different tags per file, one request
+pcxa files bulk-patch --file plan.json                        # per-file metadata plan (tags + title/category/description)
 pcxa folders tree --depth 2                                   # hierarchy
 pcxa folders create "Contracts" --parent 5                    # new folder
 pcxa folders rename 5 "Legal"                                 # rename
@@ -166,6 +168,20 @@ pcxa move 10 11 12 --folder 5                                 # bulk move files
 pcxa categorize 10 11 --category "Submittal"                  # bulk set category
 pcxa files update 10 --title "New" --tags a,b --folder 5      # single file update
 ```
+
+**Bulk tag/metadata plans (`files bulk-patch`, `tags bulk`):** `tags add/remove/set` apply the *same* tag set to a list of file ids. When each file needs *different* tags (or you're patching metadata exported from a spreadsheet), use the server-side `files/bulk_patch/` endpoint instead of one request per file — up to 500 rows per request, auto-chunked for larger plans, per-row validated so one bad row doesn't fail the batch. Output reports `patched`, `modified` (rows that actually changed), and `failed` (per-row errors).
+
+`files bulk-patch --file plan.json` takes a JSON list of rows (or `{"changes": [...]}`), each row `{file_id, ...}` setting any subset of `title`, `category`, `description`, `tags` (with optional `tag_mode` ∈ `set`|`add`|`remove`, default `set`):
+
+```json
+{"changes": [
+  {"file_id": 123, "tags": ["reviewed", "urgent"], "tag_mode": "add"},
+  {"file_id": 124, "tags": ["legal"]},
+  {"file_id": 125, "title": "ACME-0001.pdf", "category": "Contracts", "description": "Q3 amendment"}
+]}
+```
+
+`tags bulk --file plan.json` is the tag-only view of the same endpoint — rows are `{file_id, tags, tag_mode}` and scalar fields (title/category/description) are rejected with a pointer to `files bulk-patch`. `folder` is not patchable via either command (folder moves recompute privacy/aggregates — use `pcxa move`). Empty `tags` in `set` mode is refused client- and server-side to prevent an accidental mass tag-wipe; use `tag_mode: remove` to clear specific tags. Add `--dry-run` to preview the plan without sending. Both are `bulk_patch`-backed; the older `tags add/remove/set` and `bulk_update` path is now set-based server-side (pmapp2 #1265) but unchanged for callers.
 
 ## Activities
 

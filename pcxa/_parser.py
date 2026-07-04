@@ -322,6 +322,15 @@ def build_parser():
                    help="Chunk size for bulk_delete (default 500).")
     p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
+    p = files_sub.add_parser(
+        "bulk-patch",
+        help="Apply a per-file metadata/tag plan from JSON (each row sets its own "
+             "title/category/description/tags via files/bulk_patch/)")
+    p.add_argument("--file", required=True,
+                   help='JSON plan: a list of rows or {"changes": [...]}. Row: '
+                        '{"file_id": N, "tags": [...], "tag_mode": "set|add|remove", '
+                        '"title": ..., "category": ..., "description": ...}')
+
     # ── tags ──
     tags_p = sub.add_parser("tags", help="Tag management")
     tags_sub = tags_p.add_subparsers(dest="tags_command")
@@ -338,6 +347,12 @@ def build_parser():
     p = tags_sub.add_parser("set", help="Replace all tags on files")
     p.add_argument("file_ids", nargs="+", type=int)
     p.add_argument("--tags", required=True)
+
+    p = tags_sub.add_parser(
+        "bulk", help="Apply a per-file tag plan from JSON (different tags per file)")
+    p.add_argument("--file", required=True,
+                   help='JSON plan: a list of rows or {"changes": [...]}. Row: '
+                        '{"file_id": N, "tags": [...], "tag_mode": "set|add|remove"}')
 
     # ── folders ──
     folders_p = sub.add_parser("folders", help="Folder management")

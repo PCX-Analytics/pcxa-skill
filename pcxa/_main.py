@@ -46,6 +46,7 @@ from pcxa.commands.sync import cmd_files_sync
 from pcxa.commands.tags_folders import (
     cmd_categorize,
     cmd_file_update,
+    cmd_files_bulk_patch,
     cmd_files_delete,
     cmd_files_purge,
     cmd_files_restore,
@@ -58,6 +59,7 @@ from pcxa.commands.tags_folders import (
     cmd_folders_tree,
     cmd_move,
     cmd_tags_add,
+    cmd_tags_bulk,
     cmd_tags_list,
     cmd_tags_remove,
     cmd_tags_set,
@@ -201,8 +203,10 @@ SUB_HANDLERS = {
         "sync": cmd_files_sync,
         "update": cmd_file_update,
         "delete": cmd_files_delete, "restore": cmd_files_restore, "purge": cmd_files_purge,
+        "bulk-patch": cmd_files_bulk_patch,
     },
-    "tags": {"list": cmd_tags_list, "add": cmd_tags_add, "remove": cmd_tags_remove, "set": cmd_tags_set},
+    "tags": {"list": cmd_tags_list, "add": cmd_tags_add, "remove": cmd_tags_remove,
+             "set": cmd_tags_set, "bulk": cmd_tags_bulk},
     "folders": {
         "tree": cmd_folders_tree, "create": cmd_folders_create, "rename": cmd_folders_rename,
         "move": cmd_folders_move, "delete": cmd_folders_delete, "contents": cmd_folders_contents,

@@ -1,6 +1,8 @@
 """Tag management, folder navigation, and bulk file operation commands."""
 
+import json
 import sys
+from pathlib import Path
 
 from pcxa._http import requests
 from pcxa._output import out_json, out_table
@@ -69,6 +71,185 @@ def cmd_tags_set(client, args):
         out_json(data)
     else:
         print(f"Set tags {tags} on {data.get('success_count', 0)} files")
+
+
+# ── bulk_patch: per-file metadata/tag plans ────────────────────────────────
+# POST .../files/bulk_patch/ applies a plan where each row carries its OWN
+# values, unlike files/bulk_update/ (which applies one tag set to every id).
+# Added in pcxa#1283 / issue #1265. Server caps mirrored here so we fail fast
+# with a per-row message instead of 400-ing a whole chunk: max 500 rows per
+# request, tag_mode in {set, add, remove} (default set), no duplicate file_id.
+MAX_BULK_PATCH = 500
+# Each row triggers per-row validation + a simple-history scalar write before
+# the set-based tag write, so a full 500-row chunk needs more than the default
+# 30s (same reasoning as the links create-attachment/bulk/ timeout, #1245).
+BULK_PATCH_TIMEOUT = 180
+
+_PATCH_SCALAR_FIELDS = ("title", "category", "description")
+_PATCH_TAG_MODES = ("set", "add", "remove")
+
+
+def _load_bulk_plan(path):
+    """Read a bulk-patch plan JSON file into a list of raw row dicts.
+
+    Accepts either a bare JSON array of rows or an object with a ``changes``
+    key (matching the server payload). Exits the process on any structural
+    problem, so callers can assume a non-empty list.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        print(f"File not found: {file_path}", file=sys.stderr)
+        sys.exit(1)
+    raw = json.loads(file_path.read_text())
+    if isinstance(raw, dict):
+        rows = raw.get("changes")
+        if not isinstance(rows, list):
+            print("JSON object must contain a 'changes' key with a list of rows.", file=sys.stderr)
+            sys.exit(1)
+    elif isinstance(raw, list):
+        rows = raw
+    else:
+        print("JSON must be a list of rows or an object with a 'changes' key.", file=sys.stderr)
+        sys.exit(1)
+    if not rows:
+        print("No changes to apply.", file=sys.stderr)
+        sys.exit(1)
+    return rows
+
+
+def _build_patch_change(row, tag_only):
+    """Validate one plan row; return ``(change_dict, label)`` or raise ValueError.
+
+    Mirrors the server-side ``FileBulkPatchItemSerializer`` rules. ``tag_only``
+    (the ``tags bulk`` surface) rejects scalar fields and requires a tags list
+    on every row; ``files bulk-patch`` allows any subset of
+    title/category/description/tags.
+    """
+    if not isinstance(row, dict):
+        raise ValueError("row is not an object")
+    file_id = row.get("file_id")
+    if not isinstance(file_id, int) or isinstance(file_id, bool):
+        raise ValueError("missing or non-integer 'file_id'")
+
+    scalars_present = [f for f in _PATCH_SCALAR_FIELDS if f in row]
+    if tag_only and scalars_present:
+        raise ValueError(
+            f"'tags bulk' only sets tags; {scalars_present} not allowed here "
+            "(use 'files bulk-patch')"
+        )
+
+    change = {"file_id": file_id}
+    for f in scalars_present:
+        change[f] = row[f]
+
+    has_tags = "tags" in row
+    if has_tags:
+        tags = row["tags"]
+        if not isinstance(tags, list):
+            raise ValueError("'tags' must be a list of strings")
+        tags = [str(t).strip() for t in tags if str(t).strip()]
+        mode = row.get("tag_mode", "set")
+        if mode not in _PATCH_TAG_MODES:
+            raise ValueError(f"invalid tag_mode '{mode}' (expected set/add/remove)")
+        # An empty tag list in 'set' mode would wipe every tag on the file — the
+        # server rejects it (#1265) and so do we, before the request goes out.
+        if mode == "set" and not tags:
+            raise ValueError("refusing to clear all tags: 'set' mode needs a non-empty tags list")
+        change["tags"] = tags
+        change["tag_mode"] = mode
+    elif row.get("tag_mode", "set") != "set":
+        raise ValueError("tag_mode requires 'tags' to be provided")
+
+    if tag_only and not has_tags:
+        raise ValueError("'tags bulk' requires a 'tags' list on each row")
+    if not tag_only and not scalars_present and not has_tags:
+        raise ValueError("row sets nothing: provide at least one of title/category/description/tags")
+
+    parts = []
+    if has_tags:
+        parts.append(f"tags {change['tag_mode']}={change['tags']}")
+    parts.extend(scalars_present)
+    label = f"file {file_id}: " + (", ".join(parts) if parts else "(no-op)")
+    return change, label
+
+
+def _run_bulk_patch(client, args, tag_only):
+    """Shared driver for ``files bulk-patch`` and ``tags bulk``.
+
+    Validates rows client-side, chunks at ``MAX_BULK_PATCH``, POSTs each chunk
+    to ``files/bulk_patch/`` (via ``_request`` so long jobs get JWT refresh),
+    and aggregates the per-chunk ``{success_count, error_count, patched/
+    modified_file_ids, errors}`` responses.
+    """
+    rows = _load_bulk_plan(args.file)
+    changes, labels, parse_errors = [], [], []
+    seen = set()
+    for i, row in enumerate(rows):
+        try:
+            change, label = _build_patch_change(row, tag_only)
+        except ValueError as e:
+            parse_errors.append(f"[{i}] {e}")
+            continue
+        fid = change["file_id"]
+        # The server rejects a chunk that repeats a file_id; catch it up front
+        # (globally, since duplicates split across chunks would silently race).
+        if fid in seen:
+            parse_errors.append(f"[{i}] duplicate file_id {fid} (already in plan)")
+            continue
+        seen.add(fid)
+        changes.append(change)
+        labels.append(label)
+
+    if args.dry_run:
+        for i, label in enumerate(labels):
+            print(f"  [{i}] {label}")
+        print(f"\nDry run: {len(changes)} files would be patched")
+        if parse_errors:
+            print("\nSkipped (invalid rows):")
+            for err in parse_errors:
+                print(f"  {err}")
+        return
+
+    agg = {"success_count": 0, "error_count": 0,
+           "patched_file_ids": [], "modified_file_ids": [], "errors": []}
+    if changes:
+        url = client._url("files/bulk_patch/")
+        for offset in range(0, len(changes), MAX_BULK_PATCH):
+            chunk = changes[offset:offset + MAX_BULK_PATCH]
+            resp = client._request("POST", url, json={"changes": chunk}, timeout=BULK_PATCH_TIMEOUT)
+            data = resp.json()
+            agg["success_count"] += data.get("success_count", 0)
+            agg["error_count"] += data.get("error_count", 0)
+            agg["patched_file_ids"].extend(data.get("patched_file_ids", []))
+            agg["modified_file_ids"].extend(data.get("modified_file_ids", []))
+            agg["errors"].extend(data.get("errors", []))
+
+    failed = list(parse_errors)
+    for e in agg["errors"]:
+        if isinstance(e, dict):
+            failed.append(f"file {e.get('file_id', '?')}: {e.get('error', 'unknown error')}")
+        else:
+            failed.append(str(e))
+
+    if args.format == "json":
+        out_json({**agg, "skipped": parse_errors})
+    else:
+        print(f"Bulk patch complete: {agg['success_count']} patched, "
+              f"{len(agg['modified_file_ids'])} modified, {len(failed)} failed")
+        if failed:
+            print("\nFailed:")
+            for err in failed:
+                print(f"  {err}")
+
+
+def cmd_files_bulk_patch(client, args):
+    """Apply a per-file metadata/tag plan via POST files/bulk_patch/."""
+    _run_bulk_patch(client, args, tag_only=False)
+
+
+def cmd_tags_bulk(client, args):
+    """Apply a per-file *tag* plan (tag-only view of files/bulk_patch/)."""
+    _run_bulk_patch(client, args, tag_only=True)
 
 
 def cmd_folders_tree(client, args):
