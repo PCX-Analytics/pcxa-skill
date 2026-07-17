@@ -143,6 +143,7 @@ def cmd_login(args):
     """Browser-based login — opens pcxa.app and captures tokens via local callback."""
     import os
     import secrets
+    import select
     import socket
     import threading
     import webbrowser
@@ -213,8 +214,21 @@ def cmd_login(args):
         and pastes it here. Runs in a daemon thread alongside the automatic
         HTTP callback; whichever arrives first sets ``done``. Loops on bad
         input so a typo/partial paste doesn't burn the one attempt.
+
+        Polls with ``select`` rather than blocking in ``readline``: once the
+        automatic callback sets ``done`` this thread must release stdin, or it
+        steals the answer to the company/project picker the main thread prompts
+        for next.
         """
         while not done.is_set():
+            try:
+                ready = select.select([sys.stdin], [], [], 0.25)[0]
+            except Exception:
+                return  # no select on this stdin (Windows console) — don't hold it
+            if not ready:
+                continue
+            if done.is_set():
+                return
             try:
                 raw = sys.stdin.readline()
             except Exception:
@@ -274,6 +288,7 @@ def cmd_login(args):
     # localhost forwarding, remote SSH), let the user paste the redirect URL.
     # Skipped when stdin isn't a TTY (agent/piped) — there we rely on the
     # automatic callback and the timeout below.
+    reader_thread = None
     if sys.stdin.isatty():
         print(
             f"\n  Waiting for the browser to redirect back...\n"
@@ -282,7 +297,8 @@ def cmd_login(args):
             f"  paste it here, then press Enter:",
             flush=True,
         )
-        threading.Thread(target=read_manual_callback, daemon=True).start()
+        reader_thread = threading.Thread(target=read_manual_callback, daemon=True)
+        reader_thread.start()
 
     timeout = getattr(args, "timeout", 120) or 120
     try:
@@ -297,6 +313,11 @@ def cmd_login(args):
         sys.exit(1)
 
     server.shutdown()
+
+    # Let the paste reader notice ``done`` and let go of stdin before any
+    # later prompt (company/project picker) reads from it.
+    if reader_thread is not None:
+        reader_thread.join(timeout=2)
 
     if result.get("error"):
         print(f"Authorization error: {result['error']}", file=sys.stderr)
