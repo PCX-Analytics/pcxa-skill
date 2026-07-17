@@ -612,6 +612,12 @@ def build_parser():
 
     p = fields_sub.add_parser("list", help="List fields for a form")
     p.add_argument("form_id", type=int)
+    p.add_argument("--limit", type=int, default=25,
+                   help="Page size (max 1000). Default 25.")
+    p.add_argument("--offset", type=int, default=0,
+                   help="Skip this many fields (paged by --limit), matching `files list`.")
+    p.add_argument("--all", action="store_true",
+                   help="Fetch every field across all pages (overrides --limit/--offset).")
 
     p = fields_sub.add_parser("create", help="Create field on form")
     p.add_argument("form_id", type=int)

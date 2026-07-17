@@ -7,6 +7,7 @@ object, and the read-side options summary renders columns/bindings. Also locks
 in that ``field_choice_ref`` recognizes the live API's ``choice_id`` key.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from pcxa._resolve import field_choice_ref
 from pcxa.commands.forms import (
     _field_options_summary,
     cmd_fields_create,
+    cmd_fields_list,
     cmd_fields_update,
 )
 
@@ -148,3 +150,96 @@ def test_field_choice_ref_choice_id():
 
 def test_field_choice_ref_null_choice_id_is_none():
     assert field_choice_ref({"id": 1, "field_type": "table", "choice_id": None}) is None
+
+
+# --- fields list pagination (issue #1173) ---------------------------------
+
+
+class PageClient:
+    """Mock APIClient for a page-number-paginated fields endpoint with `total`
+    fields; records each call so tests can assert what was fetched."""
+
+    def __init__(self, total=49, page_size=25):
+        self.company_id = 3
+        self.project_id = 4
+        self.total = total
+        self.default_page_size = page_size
+        self.calls = []
+        self._fields = [
+            {"id": i, "order": i, "label": f"F{i}", "field_type": "text",
+             "is_required": False}
+            for i in range(1, total + 1)
+        ]
+
+    @staticmethod
+    def paginate_params(limit, offset=0):
+        params = {"page_size": limit}
+        if offset > 0:
+            params["page"] = (offset // limit) + 1
+        return params
+
+    def get(self, path, params=None, project_scoped=True):
+        self.calls.append(("GET", path, params))
+        params = params or {}
+        page_size = int(params.get("page_size", self.default_page_size))
+        page = int(params.get("page", 1))
+        start = (page - 1) * page_size
+        page_results = self._fields[start:start + page_size]
+        next_url = None
+        if start + page_size < self.total:
+            next_url = f"https://api.example/fields/?page={page + 1}"
+        return {"count": self.total, "next": next_url, "previous": None,
+                "results": page_results}
+
+    def get_all_pages(self, path, params=None, max_pages=50, project_scoped=True):
+        self.calls.append(("GET_ALL", path, params))
+        return list(self._fields)
+
+
+def _list_args(**kw):
+    d = {"format": "table", "form_id": 15, "limit": 25, "offset": 0, "all": False}
+    d.update(kw)
+    return SimpleNamespace(**d)
+
+
+def test_fields_list_warns_on_truncation(capsys):
+    c = PageClient(total=49)
+    cmd_fields_list(c, _list_args())
+    out = capsys.readouterr()
+    assert "of 49" in out.out                       # header shows the total
+    assert "showing 25 of 49" in out.err            # stderr truncation notice
+    assert "--all" in out.err
+    assert c.calls == [("GET", "forms/15/fields/", {"page_size": 25})]  # page 1 only
+
+
+def test_fields_list_no_warning_when_complete(capsys):
+    c = PageClient(total=10)
+    cmd_fields_list(c, _list_args())
+    out = capsys.readouterr()
+    assert out.err == ""                            # nothing was truncated
+    assert "Fields for form 15: 10" in out.out
+
+
+def test_fields_list_all_fetches_every_field(capsys):
+    c = PageClient(total=49)
+    cmd_fields_list(c, _list_args(all=True))
+    out = capsys.readouterr()
+    assert out.err == ""                            # --all => never truncated
+    assert c.calls == [("GET_ALL", "forms/15/fields/", None)]  # auto-paginated
+    assert "Fields for form 15: 49" in out.out
+
+
+def test_fields_list_offset_limit_pages(capsys):
+    c = PageClient(total=49)
+    cmd_fields_list(c, _list_args(offset=25, limit=25))
+    out = capsys.readouterr()
+    assert c.calls == [("GET", "forms/15/fields/", {"page_size": 25, "page": 2})]
+    assert out.err == ""                            # page 2 completes the set
+
+
+def test_fields_list_json_all_returns_full_set(capsys):
+    c = PageClient(total=30)
+    cmd_fields_list(c, _list_args(format="json", all=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 30
+    assert len(payload["results"]) == 30

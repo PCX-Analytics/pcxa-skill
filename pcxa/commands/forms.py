@@ -209,24 +209,61 @@ def cmd_forms_delete(client, args):
 
 
 def cmd_fields_list(client, args):
-    """List fields for a form."""
-    data = client.get(f"forms/{args.form_id}/fields/")
+    """List fields for a form.
+
+    A form can hold more fields than fit on one page (default 25). ``--all``
+    fetches every field (auto-paginating), while ``--limit``/``--offset`` page
+    through them exactly like ``files list``. Without ``--all``, a notice is
+    printed to stderr whenever the response is truncated, so a partial result
+    can never be mistaken for the full field set (issue #1173).
+    """
+    path = f"forms/{args.form_id}/fields/"
+    fetch_all = getattr(args, "all", False)
+    limit = getattr(args, "limit", 25)
+    offset = getattr(args, "offset", 0)
+
+    if fetch_all:
+        results = client.get_all_pages(path)
+        count = len(results)
+        truncated = False
+        data = {"count": count, "next": None, "previous": None, "results": results}
+    else:
+        params = client.paginate_params(limit, offset)
+        data = client.get(path, params)
+        if isinstance(data, dict):
+            results = data.get("results", [])
+            count = data.get("count", len(results))
+        else:
+            results = data
+            count = len(results)
+        truncated = count > offset + len(results)
+
     if args.format == "json":
         out_json(data)
-        return
-    results = data.get("results", data) if isinstance(data, dict) else data
-    rows = []
-    for f in results:
-        rows.append({
-            "id": str(f.get("id", "")),
-            "order": str(f.get("order", "")),
-            "label": str(f.get("label", ""))[:35],
-            "type": f.get("field_type", ""),
-            "req": "yes" if f.get("is_required") else "",
-            "options": _field_options_summary(f)[:30],
-        })
-    print(f"Fields for form {args.form_id}: {len(rows)}\n")
-    out_table(rows, ["id", "order", "label", "type", "req", "options"])
+    else:
+        rows = []
+        for f in results:
+            rows.append({
+                "id": str(f.get("id", "")),
+                "order": str(f.get("order", "")),
+                "label": str(f.get("label", ""))[:35],
+                "type": f.get("field_type", ""),
+                "req": "yes" if f.get("is_required") else "",
+                "options": _field_options_summary(f)[:30],
+            })
+        header = f"Fields for form {args.form_id}: {len(rows)}"
+        if truncated:
+            header += f" of {count}"
+        print(header + "\n")
+        out_table(rows, ["id", "order", "label", "type", "req", "options"])
+
+    if truncated:
+        print(
+            f"Note: showing {len(results)} of {count} fields "
+            f"(offset {offset}, limit {limit}). Use --all to fetch every "
+            f"field, or --offset/--limit to page.",
+            file=sys.stderr,
+        )
 
 
 def cmd_fields_create(client, args):
