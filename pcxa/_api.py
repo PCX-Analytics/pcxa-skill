@@ -18,6 +18,7 @@ with N-1 of them blacklisting their refresh_token (issue #550):
 
 import base64
 import json
+import os
 import sys
 import threading
 import time
@@ -25,6 +26,24 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from pcxa._config import load_config, save_config
 from pcxa._http import requests
+
+# Default per-request read timeout (seconds). Slow bulk endpoints (e.g.
+# DELETE files/bulk_delete/, which recomputes folder aggregates server-side)
+# can legitimately exceed this; callers pass an explicit ``timeout=`` or set
+# ``PCXA_HTTP_TIMEOUT`` to raise it (issue #1454).
+DEFAULT_HTTP_TIMEOUT = 30
+
+
+def _env_http_timeout():
+    """Read a positive float from ``PCXA_HTTP_TIMEOUT``, else None."""
+    raw = os.environ.get("PCXA_HTTP_TIMEOUT")
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 class AuthExpiredError(RuntimeError):
@@ -208,7 +227,12 @@ class APIClient:
         return f"{self.base_url}/api/companies/{self.company_id}/{path}"
 
     def _request(self, method, url, **kwargs):
-        kwargs.setdefault("timeout", 30)
+        # Precedence: explicit ``timeout=`` kwarg > PCXA_HTTP_TIMEOUT env >
+        # DEFAULT_HTTP_TIMEOUT. A caller that knows an endpoint is slow (bulk
+        # delete) passes its own; operators can raise the floor globally via
+        # the env var (#1454).
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = _env_http_timeout() or DEFAULT_HTTP_TIMEOUT
         self._maybe_proactive_refresh()
         resp = self.session.request(method, url, **kwargs)
         if resp.status_code in (401, 403) and self.profile.get("auth") == "jwt":
@@ -250,31 +274,58 @@ class APIClient:
         return self._request("GET", url, params=params).json()
 
     def bulk_call(self, path, ids_key, ids, base_payload=None,
-                  chunk=500, method="POST", project_scoped=True, on_chunk=None):
+                  chunk=500, method="POST", project_scoped=True, on_chunk=None,
+                  timeout=None, continue_on_error=False):
         """Call a bulk endpoint in chunks, aggregating ``success_count``,
-        ``error_count``, and ``errors`` across chunks.
+        ``error_count``, ``skipped_count``, and ``errors`` across chunks.
 
         Always routes through ``_request`` so long-running jobs get JWT
         auto-refresh — use this instead of ``c.session.*`` for any bulk
         operation that may exceed the access-token TTL (issue #562).
 
+        ``timeout`` is forwarded to every chunk request — pass a large value
+        for slow endpoints (e.g. DELETE bulk_delete, which can take minutes
+        server-side) so a per-chunk read-timeout doesn't abort the run while
+        the server keeps committing (issue #1454).
+
+        ``continue_on_error``: when True, a chunk that raises (timeout /
+        connection error) is recorded in ``agg["failed_chunks"]`` and the run
+        proceeds to the next chunk instead of aborting mid-way. Each failed
+        chunk is ``{"start": i, "size": n, "error": str}``. The server may
+        still have applied a chunk whose response we never received, so the
+        caller must treat failed chunks as *unknown*, not *not-done* — re-run
+        to reconcile. When False (default) the exception propagates unchanged.
+
         ``on_chunk(start_index, batch_size, total, response_data)`` fires
-        after each chunk, useful for progress output.
+        after each chunk. On a failed chunk (continue_on_error) it receives
+        ``{"error": str}`` so a progress printer can flag it.
         """
         ids = list(ids)
         base = dict(base_payload or {})
         url = self._url(path, project_scoped=project_scoped)
-        agg = {"success_count": 0, "error_count": 0, "errors": [], "chunks": 0}
+        agg = {
+            "success_count": 0, "error_count": 0, "skipped_count": 0,
+            "errors": [], "chunks": 0, "failed_chunks": [],
+        }
         for i in range(0, len(ids), chunk):
             batch = ids[i:i + chunk]
             payload = dict(base, **{ids_key: batch})
-            resp = self._request(method, url, json=payload)
+            try:
+                resp = self._request(method, url, json=payload, timeout=timeout)
+            except Exception as exc:
+                if not continue_on_error:
+                    raise
+                agg["failed_chunks"].append({"start": i, "size": len(batch), "error": str(exc)})
+                if on_chunk is not None:
+                    on_chunk(i, len(batch), len(ids), {"error": str(exc)})
+                continue
             try:
                 data = {} if resp.status_code == 204 else resp.json()
             except Exception:
                 data = {}
             agg["success_count"] += data.get("success_count", 0)
             agg["error_count"] += data.get("error_count", 0)
+            agg["skipped_count"] += data.get("skipped_count", 0)
             errs = data.get("errors")
             if errs:
                 agg["errors"].extend(errs)

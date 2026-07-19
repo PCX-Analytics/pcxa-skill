@@ -312,14 +312,20 @@ def build_parser():
     p.add_argument("file_ids", nargs="+", type=int)
 
     p = files_sub.add_parser("purge",
-                             help="Hard-delete files (irreversible). Chunks via bulk_delete; "
-                                  "use this instead of ad-hoc c.session.delete scripts.")
+                             help="Soft-delete files via bulk_delete, chunked (idempotent; "
+                                  "re-run to reconcile a partial run). Use this instead of "
+                                  "ad-hoc c.session.delete scripts.")
     p.add_argument("file_ids", nargs="*", type=int,
                    help="File ids. May also be supplied via --ids-file.")
     p.add_argument("--ids-file",
                    help="Read ids from file (whitespace/comma-separated). Use '-' for stdin.")
     p.add_argument("--chunk", type=int, default=500,
                    help="Chunk size for bulk_delete (default 500).")
+    p.add_argument("--timeout", type=float, default=None,
+                   help="Per-chunk HTTP read timeout in seconds (default 600). bulk_delete "
+                        "recomputes folder aggregates server-side and a full chunk can take "
+                        "minutes; the default 30s aborts mid-run while the server keeps "
+                        "committing. Also settable via PCXA_HTTP_TIMEOUT.")
     p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
     p = files_sub.add_parser(

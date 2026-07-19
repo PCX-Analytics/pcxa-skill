@@ -254,5 +254,115 @@ def test_bulk_call_on_chunk_callback_fires_per_chunk(client):
 
 def test_bulk_call_empty_ids_makes_no_request(client):
     result = client.bulk_call("files/bulk_delete/", "file_ids", [], chunk=500)
-    assert result == {"success_count": 0, "error_count": 0, "errors": [], "chunks": 0}
+    assert result == {
+        "success_count": 0, "error_count": 0, "skipped_count": 0,
+        "errors": [], "chunks": 0, "failed_chunks": [],
+    }
     assert client.session.calls == []
+
+
+# ----------------------------------------------------------------------
+# Configurable timeout + continue-on-error (issue #1454)
+# ----------------------------------------------------------------------
+
+
+def test_request_default_timeout_is_30(client):
+    client.session.default = FakeResponse(200, {})
+    client._request("GET", "https://api.example.com/files/")
+    assert client.session.calls[-1]["timeout"] == 30
+
+
+def test_request_honors_explicit_timeout(client):
+    client.session.default = FakeResponse(200, {})
+    client._request("GET", "https://api.example.com/files/", timeout=600)
+    assert client.session.calls[-1]["timeout"] == 600
+
+
+def test_request_env_timeout_overrides_default(client, monkeypatch):
+    monkeypatch.setenv("PCXA_HTTP_TIMEOUT", "123")
+    client.session.default = FakeResponse(200, {})
+    client._request("GET", "https://api.example.com/files/")
+    assert client.session.calls[-1]["timeout"] == 123
+
+
+def test_request_explicit_timeout_beats_env(client, monkeypatch):
+    monkeypatch.setenv("PCXA_HTTP_TIMEOUT", "123")
+    client.session.default = FakeResponse(200, {})
+    client._request("GET", "https://api.example.com/files/", timeout=600)
+    assert client.session.calls[-1]["timeout"] == 600
+
+
+def test_request_ignores_garbage_env_timeout(client, monkeypatch):
+    monkeypatch.setenv("PCXA_HTTP_TIMEOUT", "not-a-number")
+    client.session.default = FakeResponse(200, {})
+    client._request("GET", "https://api.example.com/files/")
+    assert client.session.calls[-1]["timeout"] == 30
+
+
+def test_bulk_call_forwards_timeout_to_every_chunk(client):
+    client.session.default = FakeResponse(200, {"success_count": 1})
+    client.bulk_call("files/bulk_delete/", "file_ids", list(range(12)),
+                     chunk=5, method="DELETE", timeout=600)
+    delete_calls = [c for c in client.session.calls if c["method"] == "DELETE"]
+    assert len(delete_calls) == 3
+    assert all(c["timeout"] == 600 for c in delete_calls)
+
+
+def test_bulk_call_aggregates_skipped_count(client):
+    client.session.responses = [
+        FakeResponse(200, {"success_count": 3, "skipped_count": 2}),
+        FakeResponse(200, {"success_count": 0, "skipped_count": 5}),
+    ]
+    result = client.bulk_call("files/bulk_delete/", "file_ids", list(range(10)),
+                              chunk=5, method="DELETE")
+    assert result["success_count"] == 3
+    assert result["skipped_count"] == 7
+
+
+def test_bulk_call_continue_on_error_records_and_proceeds(client):
+    from pcxa._http import ConnectionError as HttpConnectionError
+
+    def boom():
+        raise HttpConnectionError("The read operation timed out")
+
+    # chunk 1 raises, chunks 2 and 3 succeed.
+    client.session.responses = [
+        boom,
+        FakeResponse(200, {"success_count": 5}),
+        FakeResponse(200, {"success_count": 5}),
+    ]
+    result = client.bulk_call("files/bulk_delete/", "file_ids", list(range(15)),
+                              chunk=5, method="DELETE", continue_on_error=True)
+    assert result["success_count"] == 10  # chunks 2 + 3
+    assert result["chunks"] == 2
+    assert len(result["failed_chunks"]) == 1
+    assert result["failed_chunks"][0] == {
+        "start": 0, "size": 5, "error": "The read operation timed out",
+    }
+
+
+def test_bulk_call_reraises_without_continue_on_error(client):
+    from pcxa._http import ConnectionError as HttpConnectionError
+
+    def boom():
+        raise HttpConnectionError("The read operation timed out")
+
+    client.session.responses = [boom, FakeResponse(200, {"success_count": 5})]
+    with pytest.raises(HttpConnectionError):
+        client.bulk_call("files/bulk_delete/", "file_ids", list(range(10)),
+                         chunk=5, method="DELETE", continue_on_error=False)
+
+
+def test_bulk_call_on_chunk_flags_failed_chunk(client):
+    from pcxa._http import ConnectionError as HttpConnectionError
+
+    def boom():
+        raise HttpConnectionError("timed out")
+
+    client.session.responses = [boom, FakeResponse(200, {"success_count": 5})]
+    seen = []
+    client.bulk_call("files/bulk_delete/", "file_ids", list(range(10)),
+                     chunk=5, method="DELETE", continue_on_error=True,
+                     on_chunk=lambda s, n, t, d: seen.append(d))
+    assert "error" in seen[0]
+    assert seen[1].get("success_count") == 5

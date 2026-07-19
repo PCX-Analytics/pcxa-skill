@@ -40,10 +40,12 @@ class FakeClient:
                                      "errors": [], "chunks": 0}
 
     def bulk_call(self, path, ids_key, ids, base_payload=None, chunk=500,
-                  method="POST", project_scoped=True, on_chunk=None):
+                  method="POST", project_scoped=True, on_chunk=None,
+                  timeout=None, continue_on_error=False):
         self.bulk_calls.append({
             "path": path, "ids_key": ids_key, "ids": list(ids),
             "base_payload": base_payload, "chunk": chunk, "method": method,
+            "timeout": timeout, "continue_on_error": continue_on_error,
         })
         # Drive the progress callback once so callers can be tested for it.
         if on_chunk is not None and ids:
@@ -65,7 +67,7 @@ class FakeClient:
 
 def _args(**kwargs):
     """Helper: build an argparse.Namespace-like with sensible defaults."""
-    defaults = {"dry_run": False, "format": "text", "yes": True}
+    defaults = {"dry_run": False, "format": "text", "yes": True, "timeout": None}
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
@@ -208,6 +210,52 @@ def test_purge_small_set_uses_yn_confirmation(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda: "y")
     cmd_files_purge(c, _args(file_ids=[1, 2, 3, 4, 5], ids_file=None, chunk=500, yes=False))
     assert len(c.bulk_calls) == 1
+
+
+def test_purge_defaults_to_600s_timeout_and_continue_on_error():
+    """The slow DELETE bulk path gets a high timeout and never aborts mid-run (#1454)."""
+    c = FakeClient({"success_count": 3, "chunks": 1})
+    cmd_files_purge(c, _args(file_ids=[1, 2, 3], ids_file=None, chunk=500))
+    call = c.bulk_calls[0]
+    assert call["timeout"] == 600
+    assert call["continue_on_error"] is True
+
+
+def test_purge_explicit_timeout_flag_forwarded():
+    c = FakeClient({"success_count": 3, "chunks": 1})
+    cmd_files_purge(c, _args(file_ids=[1, 2, 3], ids_file=None, chunk=500, timeout=900))
+    assert c.bulk_calls[0]["timeout"] == 900
+
+
+def test_purge_env_timeout_used_when_no_flag(monkeypatch):
+    monkeypatch.setenv("PCXA_HTTP_TIMEOUT", "300")
+    c = FakeClient({"success_count": 3, "chunks": 1})
+    cmd_files_purge(c, _args(file_ids=[1, 2, 3], ids_file=None, chunk=500))
+    assert c.bulk_calls[0]["timeout"] == 300
+
+
+def test_purge_exits_nonzero_on_failed_chunks(capsys):
+    """A chunk with no confirmed response must surface loudly + exit non-zero,
+    so a silent partial success can't be mistaken for done (#1454)."""
+    c = FakeClient({
+        "success_count": 500, "skipped_count": 0, "error_count": 0,
+        "errors": [], "chunks": 1,
+        "failed_chunks": [{"start": 500, "size": 500, "error": "read timed out"}],
+    })
+    with pytest.raises(SystemExit) as exc:
+        cmd_files_purge(c, _args(file_ids=list(range(1000)), ids_file=None, chunk=500))
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "no confirmed response" in err
+    assert "Re-run" in err
+
+
+def test_purge_reports_skipped_count(capsys):
+    c = FakeClient({"success_count": 0, "skipped_count": 5, "error_count": 0,
+                    "errors": [], "chunks": 1})
+    cmd_files_purge(c, _args(file_ids=[1, 2, 3, 4, 5], ids_file=None, chunk=500))
+    out = capsys.readouterr().out
+    assert "skipped 5 already-deleted" in out
 
 
 def test_purge_json_format_emits_aggregate(capsys):

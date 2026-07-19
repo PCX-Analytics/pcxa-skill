@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+from pcxa._api import _env_http_timeout
 from pcxa._http import requests
 from pcxa._output import out_json, out_table
 from pcxa.commands.files import _file_row
@@ -569,19 +570,42 @@ def cmd_files_purge(client, args):
             return
 
     def _progress(start, size, tot, data):
+        if "error" in data and not data.get("success_count"):
+            print(f"  {start + size}/{tot}  CHUNK FAILED (no confirmed response): "
+                  f"{data['error']}", file=sys.stderr)
+            return
         ok = data.get("success_count", 0)
         err = data.get("error_count", 0)
-        print(f"  {start + size}/{tot}  ok={ok} err={err}", file=sys.stderr)
+        skip = data.get("skipped_count", 0)
+        print(f"  {start + size}/{tot}  ok={ok} skipped={skip} err={err}", file=sys.stderr)
 
+    # bulk_delete recomputes folder aggregates server-side; a full chunk can
+    # take minutes, so default the read timeout to 600s (flag > env > 600) and
+    # keep going past a chunk that times out — the server may have applied it,
+    # so a failed chunk means "unknown", reconcile by re-running (#1454).
+    timeout = args.timeout or _env_http_timeout() or 600.0
     data = client.bulk_call(
         "files/bulk_delete/", "file_ids", ids,
-        chunk=chunk, method="DELETE",
+        chunk=chunk, method="DELETE", timeout=timeout, continue_on_error=True,
         on_chunk=None if args.format == "json" else _progress,
     )
+    failed = data.get("failed_chunks") or []
     if args.format == "json":
         out_json(data)
     else:
-        print(f"\nPurged {data['success_count']} files "
-              f"({data['error_count']} errors) in {data['chunks']} chunks.")
-        if data["errors"]:
+        print(f"\nPurged {data.get('success_count', 0)} files "
+              f"(skipped {data.get('skipped_count', 0)} already-deleted, "
+              f"{data.get('error_count', 0)} errors) in {data.get('chunks', 0)} chunks.")
+        if data.get("errors"):
             print(f"First 3 errors: {data['errors'][:3]}", file=sys.stderr)
+        if failed:
+            n = sum(c["size"] for c in failed)
+            print(
+                f"\nWARNING: {len(failed)} chunk(s) (~{n} ids) got no confirmed "
+                f"response — the server may have applied them. Re-run the same "
+                f"purge to reconcile; already-deleted ids report as skipped.",
+                file=sys.stderr,
+            )
+    if failed:
+        # Non-zero exit so a partial run is never mistaken for a clean success.
+        sys.exit(2)
