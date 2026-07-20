@@ -25,6 +25,7 @@ import time
 from urllib.parse import parse_qs, quote, urlparse
 
 from pcxa._config import load_config, save_config
+from pcxa._http import ConnectionError as HttpConnectionError
 from pcxa._http import requests
 
 # Default per-request read timeout (seconds). Slow bulk endpoints (e.g.
@@ -230,8 +231,9 @@ class APIClient:
         # Precedence: explicit ``timeout=`` kwarg > PCXA_HTTP_TIMEOUT env >
         # DEFAULT_HTTP_TIMEOUT. A caller that knows an endpoint is slow (bulk
         # delete) passes its own; operators can raise the floor globally via
-        # the env var (#1454).
-        if kwargs.get("timeout") is None:
+        # the env var (#1454). A non-positive/None value is treated as unset so
+        # a stray ``timeout=0`` can't become a 0-second socket timeout.
+        if not kwargs.get("timeout") or kwargs["timeout"] <= 0:
             kwargs["timeout"] = _env_http_timeout() or DEFAULT_HTTP_TIMEOUT
         self._maybe_proactive_refresh()
         resp = self.session.request(method, url, **kwargs)
@@ -288,13 +290,17 @@ class APIClient:
         server-side) so a per-chunk read-timeout doesn't abort the run while
         the server keeps committing (issue #1454).
 
-        ``continue_on_error``: when True, a chunk that raises (timeout /
-        connection error) is recorded in ``agg["failed_chunks"]`` and the run
-        proceeds to the next chunk instead of aborting mid-way. Each failed
-        chunk is ``{"start": i, "size": n, "error": str}``. The server may
-        still have applied a chunk whose response we never received, so the
-        caller must treat failed chunks as *unknown*, not *not-done* — re-run
-        to reconcile. When False (default) the exception propagates unchanged.
+        ``continue_on_error``: when True, a chunk that raises a **transport**
+        error (read timeout / connection drop — ``pcxa._http.ConnectionError``)
+        is recorded in ``agg["failed_chunks"]`` and the run proceeds to the
+        next chunk instead of aborting mid-way. Each failed chunk is
+        ``{"start": i, "size": n, "error": str}``. The server may still have
+        applied a chunk whose response we never received, so the caller must
+        treat failed chunks as *unknown*, not *not-done* — re-run to reconcile.
+        Auth failures (``AuthExpiredError``) and HTTP status errors
+        (``HTTPError``) are NOT swallowed — those weren't applied and re-running
+        won't help, so they propagate even with ``continue_on_error``. When
+        False (default) every exception propagates unchanged.
 
         ``on_chunk(start_index, batch_size, total, response_data)`` fires
         after each chunk. On a failed chunk (continue_on_error) it receives
@@ -312,7 +318,11 @@ class APIClient:
             payload = dict(base, **{ids_key: batch})
             try:
                 resp = self._request(method, url, json=payload, timeout=timeout)
-            except Exception as exc:
+            except HttpConnectionError as exc:
+                # Transport error only (timeout / dropped connection): the
+                # server may have committed this chunk, so record it as unknown
+                # and keep going. Auth/HTTP errors deliberately fall through and
+                # propagate — they weren't applied and won't self-heal.
                 if not continue_on_error:
                     raise
                 agg["failed_chunks"].append({"start": i, "size": len(batch), "error": str(exc)})

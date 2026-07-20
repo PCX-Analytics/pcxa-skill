@@ -533,12 +533,20 @@ def cmd_files_restore(client, args):
 
 
 def cmd_files_purge(client, args):
-    """Hard-delete files via ``files/bulk_delete/``, chunked.
+    """Soft-delete files via ``files/bulk_delete/``, chunked.
 
-    Distinct from ``files delete``, which is a soft-delete (adds the
-    ``to_delete`` tag). ``purge`` calls the real DELETE endpoint and is
-    irreversible. Routes through ``APIClient.bulk_call`` so JWT auto-refresh
-    works across long-running jobs (issue #562).
+    Distinct from ``files delete``, which only tags files with ``to_delete``.
+    ``purge`` calls the DELETE endpoint, which soft-deletes server-side
+    (recoverable via ``files/bulk_restore/``) and is idempotent — re-running
+    over already-deleted ids is a no-op (they report as skipped). Routes
+    through ``APIClient.bulk_call`` for JWT auto-refresh across long jobs
+    (#562) and, for the slow aggregate-recompute path, a high per-chunk
+    timeout + continue-on-error (#1454).
+
+    Exit code reflects *transport* confirmation: non-zero (2) when a chunk got
+    no confirmed response (server may have applied it — re-run to reconcile).
+    Server-reported per-id failures land in ``error_count`` and are printed,
+    but don't by themselves change the exit code — they're visible, not silent.
     """
     ids = list(args.file_ids or [])
     if args.ids_file:
@@ -561,7 +569,7 @@ def cmd_files_purge(client, args):
         return
     if not args.yes:
         prompt = (f"Type {total} to confirm PURGE of {total} files: "
-                  if total >= 1000 else f"PURGE {total} files (irreversible)? [y/N] ")
+                  if total >= 1000 else f"PURGE (soft-delete) {total} files? [y/N] ")
         print(prompt, end="", flush=True)
         ans = input().strip()
         ok = ans == str(total) if total >= 1000 else ans.lower() == "y"

@@ -341,6 +341,33 @@ def test_bulk_call_continue_on_error_records_and_proceeds(client):
     }
 
 
+def test_bulk_call_continue_on_error_does_not_swallow_auth_error(client):
+    """continue_on_error is for transport failures only. An expired token must
+    still propagate (it wasn't applied; re-running won't help) rather than be
+    mislabeled as a 'server may have applied' failed chunk (#1454 review)."""
+    from pcxa._api import AuthExpiredError
+
+    def auth_boom():
+        raise AuthExpiredError("token expired")
+
+    client.session.responses = [auth_boom, FakeResponse(200, {"success_count": 5})]
+    with pytest.raises(AuthExpiredError):
+        client.bulk_call("files/bulk_delete/", "file_ids", list(range(10)),
+                         chunk=5, method="DELETE", continue_on_error=True)
+
+
+def test_bulk_call_continue_on_error_does_not_swallow_http_error(client):
+    """An HTTP status error (e.g. 500) also propagates under continue_on_error —
+    only timeouts/connection drops are treated as 'unknown, keep going'."""
+    from pcxa._http import HTTPError
+
+    client.session.responses = [FakeResponse(500, {"detail": "boom"}),
+                                FakeResponse(200, {"success_count": 5})]
+    with pytest.raises(HTTPError):
+        client.bulk_call("files/bulk_delete/", "file_ids", list(range(10)),
+                         chunk=5, method="DELETE", continue_on_error=True)
+
+
 def test_bulk_call_reraises_without_continue_on_error(client):
     from pcxa._http import ConnectionError as HttpConnectionError
 
