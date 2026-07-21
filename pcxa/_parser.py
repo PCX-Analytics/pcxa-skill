@@ -8,6 +8,7 @@ tables — `set_defaults(func=...)` is intentionally not used.
 import argparse
 
 from pcxa import __version__
+from pcxa.commands.activities import MAX_TAG_FILTER_TAGS, TAG_FILTER_MODES
 from pcxa.commands.tags_folders import DELETION_TAG
 
 
@@ -565,8 +566,8 @@ def build_parser():
     p = tf_sub.add_parser(
         "add", help="Attach a tag-filter link (e.g. pay_app AND yates) to an activity")
     p.add_argument("activity_id", type=int)
-    p.add_argument("--tags", required=True, help="Tag names (comma-sep, max 20)")
-    p.add_argument("--mode", choices=["any", "all"], default="any",
+    p.add_argument("--tags", required=True, help=f"Tag names (comma-sep, max {MAX_TAG_FILTER_TAGS})")
+    p.add_argument("--mode", choices=list(TAG_FILTER_MODES), default=TAG_FILTER_MODES[0],
                    help="any=OR match any tag (default); all=AND require every tag")
     p.add_argument("--label", help="Optional display label (defaults to a join of the tags)")
 

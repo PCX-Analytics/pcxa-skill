@@ -697,7 +697,9 @@ def cmd_tag_filters_add(client, args):
     op = "AND" if mode == "all" else "OR"
     print(f"Created tag-filter link {data.get('id')} on activity {args.activity_id}: "
           f"{_tag_filter_join(saved_tags, mode)} [{op}]")
-    print(f"  -> Files tab filter: tags={','.join(saved_tags)} ({op})")
+    # A directly runnable command that lists the set this link resolves to
+    # (real --tags-mode value, not the AND/OR label).
+    print(f"  -> reproduce: pcxa files list --tags {','.join(saved_tags)} --tags-mode {mode}")
 
 
 def cmd_tag_filters_delete(client, args):

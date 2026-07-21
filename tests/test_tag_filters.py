@@ -38,7 +38,8 @@ def test_add_all_mode_sends_payload_and_prints(client, capsys):
     out = capsys.readouterr().out
     assert "tag-filter link 12" in out
     assert "pay_app + yates [AND]" in out
-    assert "tags=pay_app,yates (AND)" in out
+    # The reproduce hint must be directly runnable — real --tags-mode, not "AND".
+    assert "files list --tags pay_app,yates --tags-mode all" in out
 
 
 def test_add_any_mode_is_default_and_omits_empty_label(client, capsys):
@@ -81,6 +82,22 @@ def test_add_json_format_emits_response(client, capsys):
     cmd_tag_filters_add(client, _args(
         activity_id=5080, tags="a,b", mode="all", label=None, format="json"))
     assert json.loads(capsys.readouterr().out) == body
+
+
+def test_list_json_and_bare_list_response(client, capsys):
+    import json
+    # A bare list (unpaginated) response must render too, not just {"results": [...]}.
+    body = [{"id": 7, "tags": ["a", "b"], "tags_mode": "all", "label": "",
+             "created_at": "2026-07-21"}]
+    client.session.default = FakeResponse(200, body)
+    cmd_tag_filters_list(client, _args(activity_id=5080, format="json"))
+    assert json.loads(capsys.readouterr().out) == body
+
+
+def test_delete_dry_run_makes_no_request(client, capsys):
+    cmd_tag_filters_delete(client, _args(activity_id=5080, link_id=12, dry_run=True))
+    assert client.session.calls == []
+    assert "Would DELETE tag-filter link 12" in capsys.readouterr().out
 
 
 def test_list_renders_table(client, capsys):
