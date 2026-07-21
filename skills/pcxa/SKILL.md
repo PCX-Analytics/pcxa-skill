@@ -45,6 +45,8 @@ Run with a generous bash timeout (e.g., 180s) since the user may take a moment t
 
 If browser login isn't viable (rare — only if the host can't reach `pcxa.app`), fall back to password login: `pcxa setup -u USER_EMAIL` (prompts for password — only works if the user can run it themselves).
 
+If a command fails with "Access token expired and refresh failed", the session is dead — surface it and ask the user to run `pcxa login`. Don't loop. (When `PCXA_EMAIL`/`PCXA_PASSWORD` are set in the environment or a `.env`, the CLI already tried to re-authenticate itself before raising, so this error means auto-login is unconfigured or was refused — the reason is on stderr.)
+
 ### Step 2 — Pick a project
 
 After login (or if `whoami` shows `Project: not set`), drive the project picker yourself:

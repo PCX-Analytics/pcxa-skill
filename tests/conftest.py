@@ -59,6 +59,20 @@ class RecordingSession:
         return self.default
 
 
+@pytest.fixture(autouse=True)
+def no_ambient_credentials(monkeypatch, tmp_path):
+    """Keep the developer's real PCXA_* credentials out of every test.
+
+    Without this, a shell (or a ``.env`` anywhere above the repo) that exports
+    PCXA_EMAIL/PCXA_PASSWORD would silently enable the auto-login path, making
+    auth tests pass or fail depending on whose machine ran them. Pointing
+    PCXA_ENV_FILE at a nonexistent path also short-circuits the CWD walk-up.
+    """
+    for key in ("PCXA_EMAIL", "PCXA_USERNAME", "PCXA_PASSWORD", "PCXA_AUTO_LOGIN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("PCXA_ENV_FILE", str(tmp_path / "absent.env"))
+
+
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     """An APIClient wired to a RecordingSession with a 1-hour-fresh access token."""

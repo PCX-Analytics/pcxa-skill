@@ -169,6 +169,157 @@ def test_blacklisted_refresh_reloads_creds_from_disk(client, monkeypatch):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Password re-login from env/.env credentials
+# ────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def env_creds(monkeypatch):
+    """Configure auto-login credentials matching the ``client`` fixture user."""
+    monkeypatch.setenv("PCXA_EMAIL", "bot@example.com")
+    monkeypatch.setenv("PCXA_PASSWORD", "s3cret")
+
+
+def _login_recorder(monkeypatch, status=200, body=None):
+    """Patch ``_api.requests.post`` to record posts; refresh always fails."""
+    posts = []
+
+    def fake_post(url, **kwargs):
+        posts.append({"url": url, **kwargs})
+        if url.endswith("/token/refresh/"):
+            return FakeResponse(401, {"code": "token_not_valid"})
+        return FakeResponse(status, body if body is not None else {
+            "access": make_jwt(exp=time.time() + 3600),
+            "refresh": "refresh-from-login",
+        })
+
+    monkeypatch.setattr("pcxa._api.requests.post", fake_post)
+    return posts
+
+
+def test_dead_refresh_token_falls_back_to_password_login(client, monkeypatch, env_creds):
+    """The headline case: refresh is rejected, credentials re-authenticate,
+    and the original request is retried instead of raising AuthExpiredError."""
+    posts = _login_recorder(monkeypatch)
+    client.session.responses = [
+        FakeResponse(401, {"code": "token_not_valid"}),
+        FakeResponse(200, {"ok": True}),
+    ]
+
+    resp = client._request("GET", "https://api.example.com/files/")
+
+    assert resp.status_code == 200
+    login_posts = [p for p in posts if p["url"].endswith("/accounts/login/")]
+    assert len(login_posts) == 1
+    assert login_posts[0]["json"] == {"username": "bot@example.com", "password": "s3cret"}
+    assert client.profile["refresh_token"] == "refresh-from-login"
+    assert client.session.headers["Authorization"] == f"Bearer {client.profile['access_token']}"
+    # Persisted, so the next process starts authenticated.
+    assert json.loads(client._creds_path.read_text())["profiles"]["test"]["refresh_token"] \
+        == "refresh-from-login"
+
+
+def test_no_refresh_token_at_all_uses_password_login(client, monkeypatch, env_creds):
+    posts = _login_recorder(monkeypatch)
+    client.profile["refresh_token"] = None
+    client.session.responses = [
+        FakeResponse(401, {"code": "token_not_valid"}),
+        FakeResponse(200, {"ok": True}),
+    ]
+
+    assert client._request("GET", "https://api.example.com/files/").status_code == 200
+    assert [p["url"] for p in posts] == ["https://api.example.com/api/accounts/login/"]
+
+
+def test_username_mismatch_refuses_to_login(client, monkeypatch, capsys):
+    """A .env for a different account must never re-auth this profile —
+    otherwise subsequent writes land under the wrong identity."""
+    monkeypatch.setenv("PCXA_EMAIL", "someone-else@example.com")
+    monkeypatch.setenv("PCXA_PASSWORD", "s3cret")
+    client.profile["username"] = "bot@example.com"
+    posts = _login_recorder(monkeypatch)
+    client.session.responses = [FakeResponse(401, {"code": "token_not_valid"})]
+
+    from pcxa._api import AuthExpiredError
+    with pytest.raises(AuthExpiredError):
+        client._request("GET", "https://api.example.com/files/")
+
+    assert not [p for p in posts if p["url"].endswith("/accounts/login/")]
+    assert "someone-else@example.com" in capsys.readouterr().err
+
+
+def test_failed_login_is_attempted_once_per_process(client, monkeypatch, env_creds):
+    """A stale password must not be replayed on every 401 — the API locks
+    accounts out after repeated failures."""
+    posts = _login_recorder(monkeypatch, status=401, body={"detail": "bad creds"})
+    client.session.default = FakeResponse(401, {"code": "token_not_valid"})
+
+    from pcxa._api import AuthExpiredError
+    for _ in range(3):
+        with pytest.raises(AuthExpiredError):
+            client._request("GET", "https://api.example.com/files/")
+
+    assert len([p for p in posts if p["url"].endswith("/accounts/login/")]) == 1
+
+
+def test_mfa_required_does_not_retry(client, monkeypatch, env_creds):
+    posts = _login_recorder(monkeypatch, body={"mfa_required": True})
+    client.session.responses = [FakeResponse(401, {"code": "token_not_valid"})]
+
+    from pcxa._api import AuthExpiredError
+    with pytest.raises(AuthExpiredError):
+        client._request("GET", "https://api.example.com/files/")
+
+    assert len([p for p in posts if p["url"].endswith("/accounts/login/")]) == 1
+
+
+def test_concurrent_relogins_collapse_to_one(client, monkeypatch, env_creds):
+    """Auto-login inherits the single-flight guarantee of _refresh_token —
+    8 workers hitting a dead session must produce ONE login POST."""
+    posts = []
+
+    def fake_post(url, **kwargs):
+        posts.append(url)
+        time.sleep(0.05)  # widen the race window
+        if url.endswith("/token/refresh/"):
+            return FakeResponse(401, {"code": "token_not_valid"})
+        return FakeResponse(200, {"access": make_jwt(exp=time.time() + 3600),
+                                  "refresh": "refresh-from-login"})
+
+    monkeypatch.setattr("pcxa._api.requests.post", fake_post)
+    client.session.default = FakeResponse(200, {"ok": True})
+    client.profile["access_token"] = make_jwt(exp=time.time() + 10)  # force refresh
+
+    errors = []
+
+    def worker():
+        try:
+            client._request("GET", "https://api.example.com/anything")
+        except Exception as e:  # pragma: no cover - surfaced via assert below
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert len([u for u in posts if u.endswith("/accounts/login/")]) == 1
+
+
+def test_auto_login_disabled_by_kill_switch(client, monkeypatch, env_creds):
+    monkeypatch.setenv("PCXA_AUTO_LOGIN", "0")
+    posts = _login_recorder(monkeypatch)
+    client.session.responses = [FakeResponse(401, {"code": "token_not_valid"})]
+
+    from pcxa._api import AuthExpiredError
+    with pytest.raises(AuthExpiredError):
+        client._request("GET", "https://api.example.com/files/")
+
+    assert not [p for p in posts if p["url"].endswith("/accounts/login/")]
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # bulk_call (issue #562)
 # ────────────────────────────────────────────────────────────────────────────
 

@@ -24,6 +24,7 @@ import time
 from urllib.parse import parse_qs, quote, urlparse
 
 from pcxa._config import load_config, save_config
+from pcxa._credentials import load_credentials
 from pcxa._http import requests
 
 
@@ -82,6 +83,9 @@ class APIClient:
         # race the rotating endpoint and blacklist each other's tokens.
         self._refresh_lock = threading.Lock()
         self._last_refresh_at = 0.0
+        # Password re-login is attempted at most once per process — see
+        # _password_relogin(). Set once the attempt is spent or ruled out.
+        self._relogin_spent = False
         self._set_auth()
 
     def _set_auth(self):
@@ -90,6 +94,8 @@ class APIClient:
             token = self.profile.get("access_token")
             if token:
                 self.session.headers["Authorization"] = f"Bearer {token}"
+            elif self._password_relogin():
+                pass  # bootstrapped a token pair from .env credentials
             else:
                 print("No access token. Run: pcxa setup", file=sys.stderr)
                 sys.exit(1)
@@ -123,6 +129,98 @@ class APIClient:
         self.session.headers["Authorization"] = f"Bearer {self.profile['access_token']}"
         return True
 
+    def _persist_tokens(self, access, refresh=None):
+        """Adopt a fresh token pair: profile, credentials file, session header."""
+        self.profile["access_token"] = access
+        if refresh:
+            self.profile["refresh_token"] = refresh
+        self.config.setdefault("profiles", {})[self.profile_name] = self.profile
+        save_config(self.config)
+        self.session.headers["Authorization"] = f"Bearer {access}"
+        self._last_refresh_at = time.time()
+
+    def _password_relogin(self):
+        """Last resort: re-authenticate with credentials from env/.env.
+
+        Only reached when the refresh token itself is gone or rejected — the
+        case that otherwise ends an unattended run with "run ``pcxa login``".
+        Returns True if a fresh token pair was obtained and persisted.
+
+        Callers must hold ``_refresh_lock`` (or be in ``__init__``, before any
+        worker threads exist) so concurrent workers collapse to one login.
+
+        Two deliberate limits:
+
+        * **Identity is pinned.** If the profile records a ``username``, the
+          configured credentials must match it. Otherwise a stray ``.env``
+          somewhere up-tree could silently re-auth as a different account and
+          every subsequent write would land under the wrong identity.
+        * **One attempt per process**, success or failure. The API locks an
+          account out after repeated failed logins, so a stale password must
+          not turn a long run into a lockout.
+        """
+        if self._relogin_spent:
+            return False
+        creds = load_credentials()
+        if creds is None:
+            self._relogin_spent = True  # nothing configured — stop looking
+            return False
+        username, password, source = creds
+
+        profile_user = (self.profile.get("username") or "").strip()
+        if profile_user and profile_user.lower() != username.lower():
+            self._relogin_spent = True
+            print(
+                f"pcxa: skipping auto-login — credentials from {source} are for "
+                f"{username}, but profile '{self.profile_name}' belongs to "
+                f"{profile_user}.",
+                file=sys.stderr,
+            )
+            return False
+
+        self._relogin_spent = True  # spend the attempt before making it
+        try:
+            resp = requests.post(
+                f"{self.base_url}/api/accounts/login/",
+                json={"username": username, "password": password},
+                headers={"Accept": "application/json"},
+                timeout=15,
+            )
+        except Exception as e:
+            print(f"pcxa: auto-login request failed: {e}", file=sys.stderr)
+            return False
+
+        if resp.status_code != 200:
+            print(
+                f"pcxa: auto-login failed ({resp.status_code}) for {username} using "
+                f"credentials from {source}. Run: pcxa login",
+                file=sys.stderr,
+            )
+            return False
+
+        try:
+            data = resp.json() or {}
+        except Exception:
+            data = {}
+        if data.get("mfa_required"):
+            print(
+                "pcxa: auto-login blocked — this account requires MFA, which the "
+                "CLI can't complete. Run: pcxa login",
+                file=sys.stderr,
+            )
+            return False
+        access = data.get("access")
+        if not access:
+            print("pcxa: auto-login returned no access token. Run: pcxa login",
+                  file=sys.stderr)
+            return False
+
+        self._persist_tokens(access, data.get("refresh"))
+        self.profile.setdefault("username", username)
+        print(f"pcxa: session expired — re-authenticated as {username} "
+              f"(credentials from {source})", file=sys.stderr)
+        return True
+
     def _refresh_token(self):
         """Single-flight refresh. Safe under concurrent callers.
 
@@ -132,57 +230,63 @@ class APIClient:
         already-rotated token without a second network call — this is what
         prevents the thundering-herd blacklist race documented in issue #550.
 
-        If the backend reports the refresh_token is blacklisted (another
-        *process* — not just another thread — has already rotated it), reload
-        credentials.json from disk and treat that as success.
+        If the refresh token is missing or unusable, falls back to a password
+        re-login from env/.env credentials (``_password_relogin``) — inside the
+        same lock, so the fallback inherits the single-flight guarantee.
         """
-        if not self.profile.get("refresh_token"):
-            return False
         with self._refresh_lock:
             # Fast path: another thread refreshed moments ago. The Authorization
             # header was already updated by that thread; just signal success.
             if time.time() - self._last_refresh_at < REFRESH_REUSE_SECONDS:
                 return True
-            refresh = self.profile.get("refresh_token")
-            try:
-                resp = requests.post(
-                    f"{self.base_url}/api/accounts/token/refresh/",
-                    json={"refresh": refresh},
-                    headers={"Accept": "application/json"},
-                    timeout=10,
-                )
-            except Exception as e:
-                print(f"Token refresh error: {e}", file=sys.stderr)
-                return False
+            if self._refresh_with_token():
+                return True
+            return self._password_relogin()
 
-            if resp.status_code == 200:
-                data = resp.json()
-                self.profile["access_token"] = data["access"]
-                if "refresh" in data:
-                    self.profile["refresh_token"] = data["refresh"]
-                self.config["profiles"][self.profile_name] = self.profile
-                save_config(self.config)
-                self.session.headers["Authorization"] = f"Bearer {data['access']}"
+    def _refresh_with_token(self):
+        """Rotate the access token using the stored refresh token.
+
+        Caller holds ``_refresh_lock``. If the backend reports the
+        refresh_token is blacklisted (another *process* — not just another
+        thread — has already rotated it), reload credentials.json from disk and
+        treat that as success.
+        """
+        refresh = self.profile.get("refresh_token")
+        if not refresh:
+            return False
+        try:
+            resp = requests.post(
+                f"{self.base_url}/api/accounts/token/refresh/",
+                json={"refresh": refresh},
+                headers={"Accept": "application/json"},
+                timeout=10,
+            )
+        except Exception as e:
+            print(f"Token refresh error: {e}", file=sys.stderr)
+            return False
+
+        if resp.status_code == 200:
+            data = resp.json()
+            self._persist_tokens(data["access"], data.get("refresh"))
+            return True
+
+        # Blacklisted refresh_token usually means a sibling process won the
+        # rotation race. Re-read credentials.json — if a fresh token is
+        # waiting on disk, adopt it instead of failing the run.
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        if resp.status_code in (400, 401) and body.get("code") == "token_not_valid":
+            if self._reload_credentials_from_disk():
                 self._last_refresh_at = time.time()
                 return True
 
-            # Blacklisted refresh_token usually means a sibling process won the
-            # rotation race. Re-read credentials.json — if a fresh token is
-            # waiting on disk, adopt it instead of failing the run.
-            try:
-                body = resp.json()
-            except Exception:
-                body = {}
-            if resp.status_code in (400, 401) and body.get("code") == "token_not_valid":
-                if self._reload_credentials_from_disk():
-                    self._last_refresh_at = time.time()
-                    return True
-
-            print(
-                f"Token refresh failed ({resp.status_code}). Run: pcxa setup -u YOUR_EMAIL",
-                file=sys.stderr,
-            )
-            return False
+        print(
+            f"Token refresh failed ({resp.status_code}). Run: pcxa setup -u YOUR_EMAIL",
+            file=sys.stderr,
+        )
+        return False
 
     def _maybe_proactive_refresh(self):
         """Refresh if the access_token is about to expire.
@@ -221,8 +325,9 @@ class APIClient:
                     resp = self.session.request(method, url, **kwargs)
                 elif body.get("code") == "token_not_valid":
                     raise AuthExpiredError(
-                        "Access token expired and refresh failed — "
-                        "run `pcxa login` and retry"
+                        "Access token expired and refresh failed — run "
+                        "`pcxa login` and retry (or set PCXA_EMAIL/PCXA_PASSWORD "
+                        "in the environment or a .env for unattended re-login)"
                     )
         resp.raise_for_status()
         return resp

@@ -109,6 +109,46 @@ Fallback if browser login isn't available:
 pcxa setup -u you@example.com
 ```
 
+## Unattended re-login (agents, cron, CI)
+
+The CLI keeps a session alive by rotating its JWT. When the *refresh* token
+itself expires, there is nothing left to present and the run stops with
+``run `pcxa login` and retry`` — fine at a keyboard, fatal for an agent or a
+scheduled job.
+
+Give it credentials and it re-authenticates itself instead:
+
+```bash
+# environment
+export PCXA_EMAIL=bot@example.com
+export PCXA_PASSWORD=...
+
+# ...or a .env file
+PCXA_EMAIL=bot@example.com
+PCXA_PASSWORD=...
+```
+
+Lookup order per field: `PCXA_EMAIL` (or `PCXA_USERNAME`) / `PCXA_PASSWORD` in
+the environment, then a `.env` file — `$PCXA_ENV_FILE` if set, else the nearest
+`.env` walking up from the current directory, else `~/.pcxa/.env`. With nothing
+configured, behavior is unchanged.
+
+This is a *fallback*, not the normal path: token refresh is always tried first,
+and the credentials are used only when refresh can't recover. Guardrails:
+
+- **Identity is pinned.** If the profile records a username, the configured
+  credentials must be for that same user or the login is refused — a stray
+  `.env` up-tree can't silently re-auth you as someone else.
+- **One attempt per process**, success or failure. A stale password logs one
+  error instead of replaying until the account is locked out.
+- **MFA accounts can't auto-login** — the CLI says so and stops.
+- `PCXA_AUTO_LOGIN=0` disables the whole path.
+
+⚠️ This stores an account password in plaintext. Use a dedicated
+low-privilege account rather than a personal or admin one, keep the `.env`
+gitignored and `chmod 600`, and prefer `pcxa login` anywhere a human is
+present.
+
 ## Per-repo credentials
 
 Credentials resolve **folder-first**. When you run `pcxa` from inside a repo,
