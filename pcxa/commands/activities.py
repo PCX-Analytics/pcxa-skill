@@ -623,6 +623,93 @@ def cmd_deps_delete(client, args):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TAG-FILTER LINKS (saved tag queries attached to an activity)
+# ═══════════════════════════════════════════════════════════════════════════════
+# A single link that stands for a *set* of files matched by tags — the AND/OR
+# combination the plain generic-link can't express (issue #1481). "Pay apps for
+# Yates" = tags [pay_app, yates] in `all` mode. The set is dynamic: it resolves
+# live to whatever files carry the tags (see `files list --tags <...> --tags-mode
+# <...>`), and the web app renders each link as a chip that deep-links into the
+# Files tab with the filter pre-applied. Backed by the nested endpoint
+# `activities/{id}/tag-filter-links/` (ActivityTagFilterLink).
+
+# Server caps a link at 20 tags (ActivityTagFilterLinkSerializer.validate_tags);
+# mirror it so we fail fast with a clear message instead of a 400.
+MAX_TAG_FILTER_TAGS = 20
+# any = files with at least one of the tags (OR); all = files carrying every tag (AND).
+TAG_FILTER_MODES = ("any", "all")
+
+
+def _tag_filter_join(tags, mode):
+    """Human label for a tag set: ``a + b`` for AND, ``a, b`` for OR — matching
+    the server's ``display_label`` so CLI output reads like the web chip."""
+    return (" + " if mode == "all" else ", ").join(tags)
+
+
+def cmd_tag_filters_list(client, args):
+    """List the tag-filter links (saved tag queries) on an activity."""
+    data = client.get(f"activities/{args.activity_id}/tag-filter-links/")
+    if args.format == "json":
+        out_json(data)
+        return
+    results = data.get("results", data) if isinstance(data, dict) else data
+    rows = []
+    for link in results:
+        tags = link.get("tags") or []
+        mode = link.get("tags_mode", "any")
+        rows.append({
+            "id": str(link.get("id", "")),
+            "mode": mode,
+            "tags": _tag_filter_join([str(t) for t in tags], mode)[:50],
+            "label": str(link.get("label") or link.get("display_label") or "")[:30],
+            "created": str(link.get("created_at", ""))[:10],
+        })
+    print(f"Tag-filter links for activity {args.activity_id}: {len(rows)}\n")
+    out_table(rows, ["id", "mode", "tags", "label", "created"])
+
+
+def cmd_tag_filters_add(client, args):
+    """Attach a saved tag query (evidence set) to an activity.
+
+    ``--mode all`` requires every tag (AND) — e.g. pay_app AND yates; ``--mode
+    any`` (default) matches any of them (OR).
+    """
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+    if not tags:
+        print("Provide at least one tag via --tags (comma-separated).", file=sys.stderr)
+        sys.exit(1)
+    if len(tags) > MAX_TAG_FILTER_TAGS:
+        print(f"Too many tags ({len(tags)}); a tag-filter link allows at most "
+              f"{MAX_TAG_FILTER_TAGS}.", file=sys.stderr)
+        sys.exit(1)
+    payload = {"tags": tags, "tags_mode": args.mode}
+    if args.label:
+        payload["label"] = args.label
+    if args.dry_run:
+        print(f"Would CREATE tag-filter link on activity {args.activity_id}: {payload}")
+        return
+    data = client.post(f"activities/{args.activity_id}/tag-filter-links/", payload)
+    if args.format == "json":
+        out_json(data)
+        return
+    mode = data.get("tags_mode", args.mode)
+    saved_tags = [str(t) for t in (data.get("tags") or tags)]
+    op = "AND" if mode == "all" else "OR"
+    print(f"Created tag-filter link {data.get('id')} on activity {args.activity_id}: "
+          f"{_tag_filter_join(saved_tags, mode)} [{op}]")
+    print(f"  -> Files tab filter: tags={','.join(saved_tags)} ({op})")
+
+
+def cmd_tag_filters_delete(client, args):
+    """Remove a tag-filter link from an activity."""
+    if args.dry_run:
+        print(f"Would DELETE tag-filter link {args.link_id} from activity {args.activity_id}")
+        return
+    client.delete(f"activities/{args.activity_id}/tag-filter-links/{args.link_id}/")
+    print(f"Deleted tag-filter link {args.link_id} from activity {args.activity_id}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # GANTT / TREE
 # ═══════════════════════════════════════════════════════════════════════════════
 

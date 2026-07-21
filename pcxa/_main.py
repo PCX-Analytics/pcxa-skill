@@ -88,6 +88,9 @@ from pcxa.commands.activities import (
     cmd_steps_from_template,
     cmd_steps_list,
     cmd_steps_update,
+    cmd_tag_filters_add,
+    cmd_tag_filters_delete,
+    cmd_tag_filters_list,
     cmd_tree,
 )
 from pcxa.commands.chat import (
@@ -223,6 +226,9 @@ SUB_HANDLERS = {
     },
     "progress": {"list": cmd_progress_list, "add": cmd_progress_add, "delete": cmd_progress_delete},
     "deps": {"list": cmd_deps_list, "create": cmd_deps_create, "delete": cmd_deps_delete},
+    "tag-filters": {
+        "list": cmd_tag_filters_list, "add": cmd_tag_filters_add, "delete": cmd_tag_filters_delete,
+    },
     "forms": {
         "list": cmd_forms_list, "get": cmd_forms_get, "create": cmd_forms_create,
         "update": cmd_forms_update, "delete": cmd_forms_delete,
@@ -293,6 +299,7 @@ SUB_COMMAND_KEYS = {
     "files": "files_command", "tags": "tags_command", "folders": "folders_command",
     "activities": "activities_command", "steps": "steps_command",
     "progress": "progress_command", "deps": "deps_command",
+    "tag-filters": "tag_filters_command",
     "forms": "forms_command", "fields": "fields_command",
     "submissions": "submissions_command",
     "custom-objects": "custom_objects_command",

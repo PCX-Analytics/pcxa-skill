@@ -276,6 +276,19 @@ pcxa deps create --predecessor 10 --successor 20 --type FS --lag 2
 pcxa deps delete 456
 ```
 
+## Tag-Filter Links (evidence sets on an activity)
+
+Attach a **saved tag query** to an activity as one link that stands for a whole *set* of files — the AND/OR combination a plain object link can't express. "Pay apps for Yates" = tags `pay_app` **and** `yates` in `all` mode. The set is **dynamic**: it resolves live to whatever files currently carry the tags (`pcxa files list --tags pay_app,yates --tags-mode all`), and the web app renders each link as a chip that deep-links into the Files tab with the filter pre-applied.
+
+```bash
+pcxa tag-filters list 5080                                          # links on activity 5080
+pcxa tag-filters add 5080 --tags pay_app,yates --mode all           # AND: files with BOTH tags
+pcxa tag-filters add 5080 --tags rfi,submittal --mode any --label "Open items"  # OR (default)
+pcxa tag-filters delete 5080 12                                     # remove link 12
+```
+
+`--mode all` requires **every** tag (AND); `--mode any` (default) matches **any** tag (OR) — same semantics as `files list --tags-mode`. Up to 20 tags per link; `--label` overrides the default `tag1 + tag2` display label. This is the CLI surface for the backend's `ActivityTagFilterLink` (nested under `activities/{id}/tag-filter-links/`). Use it instead of `links create --target …` when the evidence is defined by a tag combination rather than a fixed object.
+
 ## Gantt & WBS Tree
 
 ```bash

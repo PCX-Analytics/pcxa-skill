@@ -553,6 +553,27 @@ def build_parser():
     p = deps_sub.add_parser("delete", help="Delete dependency")
     p.add_argument("dep_id", type=int)
 
+    # ── tag-filters (saved tag-query links on an activity) ──
+    tf_p = sub.add_parser(
+        "tag-filters",
+        help="Attach saved tag queries (AND/OR evidence sets) to an activity")
+    tf_sub = tf_p.add_subparsers(dest="tag_filters_command")
+
+    p = tf_sub.add_parser("list", help="List an activity's tag-filter links")
+    p.add_argument("activity_id", type=int)
+
+    p = tf_sub.add_parser(
+        "add", help="Attach a tag-filter link (e.g. pay_app AND yates) to an activity")
+    p.add_argument("activity_id", type=int)
+    p.add_argument("--tags", required=True, help="Tag names (comma-sep, max 20)")
+    p.add_argument("--mode", choices=["any", "all"], default="any",
+                   help="any=OR match any tag (default); all=AND require every tag")
+    p.add_argument("--label", help="Optional display label (defaults to a join of the tags)")
+
+    p = tf_sub.add_parser("delete", help="Remove a tag-filter link from an activity")
+    p.add_argument("activity_id", type=int)
+    p.add_argument("link_id", type=int)
+
     # ── gantt / tree ──
     p = sub.add_parser("gantt", help="Gantt view")
     p.add_argument("--status")
