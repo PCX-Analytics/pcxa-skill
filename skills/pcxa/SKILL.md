@@ -95,8 +95,8 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 ```bash
 pcxa files list --ext PDF --search "keyword" --limit 50  # title trigram (fuzzy by default; exact first)
 pcxa files list --search "concret" --exact               # tight substring only — `concret` will NOT match `Concrete`
-pcxa files list --content "IOCC-387"                     # full-text of file BODY — finds files by contents (paginated + countable)
-pcxa files list --content "IOCC-387" --count-only        # exact total of content matches (not capped at 50)
+pcxa files list --content "IOCC-387"                     # literal substring in file BODY — every match, paginated (stable id order)
+pcxa files list --content "IOCC-387" --count-only        # exact total of content matches (count:0 = genuinely not located)
 pcxa files list --tags "urgent,review" --tags-mode all   # AND: files with ALL tags
 pcxa files search "natural language query"                    # hybrid BM25 + semantic (same endpoint as the web UI)
 pcxa files search "query" --scope file,activity               # restrict source types (csv: file,activity,drawing,photo)
@@ -148,8 +148,8 @@ Search results include `url` fields — always show these to users for document 
 
 **Three ways to find files — pick by what you need:**
 - **`files list --search <term>`** — matches the **title/filename** only (trigram). Paginated + countable. Use when you know part of the name.
-- **`files list --content <term>`** — matches the indexed **body/contents** (full-text). Paginated + countable, so `--content <term> --count-only` gives the *exact* total and you can page through *all* matches. Use to find files by what's inside them — e.g. an eDiscovery estate where emails are named by bare Bates numbers (`YATES002119058`) and the term only appears in the body. Only indexed files match.
-- **`files search <term>` / `files content <term>`** — hybrid semantic + keyword ranking (relevance-ordered). Best for natural-language / "most relevant" lookups, but it's a **top-N reranked list capped at 50 with no total** — don't use it when you need to count or enumerate every match; use `--content` for that.
+- **`files list --content <term>`** — matches the indexed **body/contents** as a **literal substring** (not ranked, not semantic). Paginated + **countable and exhaustive**: `--content <term> --count-only` gives the *exact* total and you can page through *every* match in a stable order (by `id`). `count: 0` means the term is genuinely in no in-scope file — so this is the path for a "not located" / completeness finding. Use it to find files by what's inside them — e.g. an eDiscovery estate where emails are named by bare Bates numbers (`YATES002119058`) and the term only appears in the body. Only indexed files match; scope with `--folder`/`--ext`/`--index-status`.
+- **`files search <term>` / `files content <term>`** — hybrid semantic + keyword **ranking** (relevance-ordered), a **top-50 reranked sample, not a total**. Best for natural-language / "most relevant" lookups. Do **not** use it to count or enumerate — it can't page past 50, and asking for more (`--limit 200`) is clamped to 50 with a notice pointing you at `--content`. For "how many / list them all", use `--content`.
 
 `--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc.
 
