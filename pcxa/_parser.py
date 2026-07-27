@@ -98,6 +98,9 @@ def build_parser():
     p.add_argument("--folder", type=int, help="Folder ID")
     p.add_argument("--category", help="Category")
     p.add_argument("--search", "-s", help="Title search (trigram fuzzy by default; exact matches rank first)")
+    p.add_argument("--content", help="Literal substring search of file BODY/contents — exhaustive + countable "
+                                     "(unlike the ranked, 50-capped `files search`). Finds files by what's inside "
+                                     "them even when the filename doesn't match; count:0 means genuinely not located.")
     p.add_argument("--exact", action="store_true",
                    help="Tight substring matching (rejects typos). Default is fuzzy with exact-first ranking.")
     p.add_argument("--index-status", choices=["indexed", "pending", "processing", "failed"])

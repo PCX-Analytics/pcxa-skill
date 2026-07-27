@@ -8,6 +8,10 @@ from pcxa._config import KNOWN_FILE_TYPES
 from pcxa._http import requests
 from pcxa._output import fmt_size, out_json, out_table, tag_names
 
+# Server-side hard cap on `semantic-search/search/` results (ranked top-N).
+# Mirrored here so the CLI can clamp + warn instead of silently truncating.
+SEMANTIC_SEARCH_CAP = 50
+
 
 def _file_row(f):
     return {
@@ -44,17 +48,40 @@ def cmd_files_list(client, args):
         # back into the tighter 0.8-threshold substring mode.
         if not getattr(args, "exact", False):
             params["search_mode"] = "fuzzy"
+    if getattr(args, "content", None):
+        # Literal substring match on indexed file *body* (not just the title) —
+        # finds files whose contents contain the term even when the filename
+        # doesn't (e.g. emails named by a bare Bates number). Exhaustive and
+        # countable (unlike `files search`). Composes with --search.
+        params["content_contains"] = args.content
     if args.index_status:
         params["search_status"] = args.index_status
-    # When --sort is unspecified and --search is supplied, omit `ordering`
-    # so the backend's TrigramSearchFilter can rank by similarity DESC.
-    # Otherwise default to -created_at to preserve the prior listing UX.
-    sort = args.sort if args.sort is not None else (None if args.search else "-created_at")
+    # Ordering defaults:
+    #  - explicit --sort always wins.
+    #  - --content: order by `id` — a unique, deterministic key so paging is
+    #    exhaustive (exactly `count` distinct ids, no repeats/skips), which is
+    #    what a content enumeration needs.
+    #  - --search: omit `ordering` so TrigramSearchFilter ranks by similarity.
+    #  - otherwise: -created_at (prior listing UX).
+    if args.sort is not None:
+        sort = args.sort
+    elif getattr(args, "content", None):
+        sort = "id"
+    elif args.search:
+        sort = None
+    else:
+        sort = "-created_at"
     if sort:
         params["ordering"] = sort
 
     if args.count_only:
-        print(json.dumps({"count": client.get_count("files/", params)}))
+        # The list endpoint defers the count for any filtered query
+        # (count:null, count_state=deferred), so read the exact total for the
+        # same filter set from the /total-size/ action instead. This is what
+        # makes `--content <term> --count-only` return a real number.
+        data = client.get("files/total-size/", params)
+        count = data.get("count") if isinstance(data, dict) else None
+        print(json.dumps({"count": count}))
         return
 
     data = client.get("files/", params)
@@ -62,9 +89,13 @@ def cmd_files_list(client, args):
         out_json(data)
     else:
         results = data.get("results", data) if isinstance(data, dict) else data
-        total = data.get("count", len(results)) if isinstance(data, dict) else len(results)
         rows = [_file_row(f) for f in results]
-        print(f"Files: {len(rows)} of {total}\n")
+        total = data.get("count") if isinstance(data, dict) else len(results)
+        # Filtered lists defer the count (null); point the user at the exact
+        # total instead of printing "of None".
+        shown = f"{len(rows)} of {total}" if total is not None else \
+            f"{len(rows)} (total deferred — add --count-only for the exact count)"
+        print(f"Files: {shown}\n")
         out_table(rows, ["id", "title", "type", "folder", "size", "created", "tags"])
 
 
@@ -74,11 +105,24 @@ def cmd_files_search(client, args):
     Routes through ``semantic-search/search/`` (Pinecone semantic + BM25
     over the GIN-indexed ``FileChunk.search_vector`` + Cohere rerank).
     """
-    params = {"q": args.query, "limit": args.page_size}
+    # The endpoint is a Cohere-reranked top-N hard-capped at 50 server-side; it
+    # returns a ranked list, NOT a count. Clamp the sent limit and tell the user
+    # so `--limit 200` isn't silently truncated to a misleading "50".
+    requested = args.page_size
+    params = {"q": args.query, "limit": min(requested, SEMANTIC_SEARCH_CAP)}
     if args.scope:
         params["source_types"] = args.scope
     if args.ext:
         params["file_types"] = args.ext
+
+    if requested and requested > SEMANTIC_SEARCH_CAP:
+        print(
+            f"Note: `files search` is a relevance-ranked top-{SEMANTIC_SEARCH_CAP} "
+            f"(you asked for {requested}) — a ranked sample, NOT a count. To enumerate "
+            f'and COUNT every file whose text contains a term, use:  '
+            f'pcxa files list --content "{args.query}" [--count-only]',
+            file=sys.stderr,
+        )
 
     data = client.get("semantic-search/search/", params)
 
@@ -100,7 +144,11 @@ def _print_search_results(data, *, query):
     total = data.get("total_results", len(results))
     hybrid = data.get("hybrid_enabled")
     suffix = "  (hybrid)" if hybrid else ""
-    print(f"Search results for {query!r}: {total}{suffix}\n")
+    # At the cap this is a ranked sample, not a total — don't let the header read
+    # as "there are exactly N matches" (use `files list --content` to count).
+    total_label = f"{total} (ranked top-{SEMANTIC_SEARCH_CAP}, capped — not a count)" \
+        if total >= SEMANTIC_SEARCH_CAP else str(total)
+    print(f"Search results for {query!r}: {total_label}{suffix}\n")
     if not results:
         print("  (no results)")
         return
