@@ -44,6 +44,11 @@ def cmd_files_list(client, args):
         # back into the tighter 0.8-threshold substring mode.
         if not getattr(args, "exact", False):
             params["search_mode"] = "fuzzy"
+    if getattr(args, "content", None):
+        # Full-text match on indexed file *body* (not just the title) — finds
+        # files whose contents mention the term even when the filename doesn't
+        # (e.g. emails named by a bare Bates number). Composes with --search.
+        params["content"] = args.content
     if args.index_status:
         params["search_status"] = args.index_status
     # When --sort is unspecified and --search is supplied, omit `ordering`
@@ -54,7 +59,13 @@ def cmd_files_list(client, args):
         params["ordering"] = sort
 
     if args.count_only:
-        print(json.dumps({"count": client.get_count("files/", params)}))
+        # The list endpoint defers the count for any filtered query
+        # (count:null, count_state=deferred), so read the exact total for the
+        # same filter set from the /total-size/ action instead. This is what
+        # makes `--content <term> --count-only` return a real number.
+        data = client.get("files/total-size/", params)
+        count = data.get("count") if isinstance(data, dict) else None
+        print(json.dumps({"count": count}))
         return
 
     data = client.get("files/", params)
@@ -62,9 +73,13 @@ def cmd_files_list(client, args):
         out_json(data)
     else:
         results = data.get("results", data) if isinstance(data, dict) else data
-        total = data.get("count", len(results)) if isinstance(data, dict) else len(results)
         rows = [_file_row(f) for f in results]
-        print(f"Files: {len(rows)} of {total}\n")
+        total = data.get("count") if isinstance(data, dict) else len(results)
+        # Filtered lists defer the count (null); point the user at the exact
+        # total instead of printing "of None".
+        shown = f"{len(rows)} of {total}" if total is not None else \
+            f"{len(rows)} (total deferred — add --count-only for the exact count)"
+        print(f"Files: {shown}\n")
         out_table(rows, ["id", "title", "type", "folder", "size", "created", "tags"])
 
 

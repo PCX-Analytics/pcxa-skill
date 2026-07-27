@@ -95,6 +95,8 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 ```bash
 pcxa files list --ext PDF --search "keyword" --limit 50  # title trigram (fuzzy by default; exact first)
 pcxa files list --search "concret" --exact               # tight substring only — `concret` will NOT match `Concrete`
+pcxa files list --content "IOCC-387"                     # full-text of file BODY — finds files by contents (paginated + countable)
+pcxa files list --content "IOCC-387" --count-only        # exact total of content matches (not capped at 50)
 pcxa files list --tags "urgent,review" --tags-mode all   # AND: files with ALL tags
 pcxa files search "natural language query"                    # hybrid BM25 + semantic (same endpoint as the web UI)
 pcxa files search "query" --scope file,activity               # restrict source types (csv: file,activity,drawing,photo)
@@ -143,6 +145,13 @@ Search results include `url` fields — always show these to users for document 
 **`--search` is fuzzy by default (`files list`, `files aggregate`, `activities list`).** Backend uses PostgreSQL trigram similarity: exact substring matches surface first (similarity ~1.0), then typo-tolerant matches ranked by similarity DESC, in a single paginated response. `concret` finds `Concrete Pour`; `0314` ranks `RFI-0314` above `Document-031499`. Pass `--exact` to opt back into tight substring matching (rejects typos — useful when the query is a known-correct identifier and you don't want fuzzy noise). The backend rate-limits fuzzy search to 100/min per user; not normally a concern for agent use.
 
 **Search response shape:** `pcxa files search` returns `{query, total_results, results, hybrid_enabled}` — a top-N reranked list (server-capped at 50). Each row carries `score`, `file_id`/`activity_id`, `file_name`/`title`, `folder_path`, `page_number`, `chunk_position`, and a `url`. Hybrid means the result is the union of Pinecone semantic similarity and BM25 over the project's chunk text, RRF-fused and Cohere-reranked — the same path the web UI's search bar uses.
+
+**Three ways to find files — pick by what you need:**
+- **`files list --search <term>`** — matches the **title/filename** only (trigram). Paginated + countable. Use when you know part of the name.
+- **`files list --content <term>`** — matches the indexed **body/contents** (full-text). Paginated + countable, so `--content <term> --count-only` gives the *exact* total and you can page through *all* matches. Use to find files by what's inside them — e.g. an eDiscovery estate where emails are named by bare Bates numbers (`YATES002119058`) and the term only appears in the body. Only indexed files match.
+- **`files search <term>` / `files content <term>`** — hybrid semantic + keyword ranking (relevance-ordered). Best for natural-language / "most relevant" lookups, but it's a **top-N reranked list capped at 50 with no total** — don't use it when you need to count or enumerate every match; use `--content` for that.
+
+`--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc.
 
 **After search → read in batch.** Once `files search` returns the rows, prefer `files batch-read --chunk file_id:chunk_position` over N single `files read` calls. Each row carries a `chunk_position` — pass `file_id:chunk_position` as `--chunk` to read just the relevant excerpt + neighbors. One round trip instead of N. Use `--outline` for section maps when files are large and you need to plan further reads.
 
