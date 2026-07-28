@@ -102,7 +102,10 @@ def build_parser():
                                      "(unlike the ranked, 50-capped `files search`). Finds files by what's inside "
                                      "them even when the filename doesn't match; count:0 means genuinely not located.")
     p.add_argument("--exact", action="store_true",
-                   help="Tight substring matching (rejects typos). Default is fuzzy with exact-first ranking.")
+                   help="Tighten title matching (drop fuzzy/typo tolerance). NOT a literal phrase "
+                        "match — words are AND-matched separately, so 'Case Memo' also matches "
+                        "'Case Assessment Memorandum'. For a true literal phrase use: "
+                        "pcxa files query 'title:\"Case Memo\"'")
     p.add_argument("--index-status", choices=["indexed", "pending", "processing", "failed"])
     # Default is None (not "-created_at") so fuzzy search can rank by
     # similarity DESC. When --search is absent we fall back to -created_at
@@ -129,6 +132,27 @@ def build_parser():
     # / `files content` / etc., which agent wrappers expect to use uniformly.
     p.add_argument("--page-size", "--limit", dest="page_size", type=int, default=25,
                    help="Max results (server-capped at 50)")
+
+    p = files_sub.add_parser(
+        "query",
+        help="BOOLEAN file search — AND/OR/NOT, grouping, field scoping, phrases (exhaustive + exact count)",
+    )
+    p.add_argument("query",
+                   help='Boolean expression, e.g. \'title:report AND (delay OR "change order")\'. '
+                        'Fields: title (alias name), content. Bare terms search content. '
+                        'Operators are UPPERCASE. Quote a term to match it as an adjacent phrase.')
+    p.add_argument("--ext", help="File type filter (csv, e.g. PDF,DOCX)")
+    p.add_argument("--folder", type=int, help="Folder ID (includes subtree)")
+    p.add_argument("--doc-date-from", dest="doc_date_from",
+                   help="Document's own extracted date >= YYYY-MM-DD. NOTE: files the "
+                        "extractor could not date are EXCLUDED by this filter.")
+    p.add_argument("--doc-date-to", dest="doc_date_to", help="Document's own extracted date <= YYYY-MM-DD")
+    p.add_argument("--created-from", dest="created_from", help="Upload date >= YYYY-MM-DD")
+    p.add_argument("--created-to", dest="created_to", help="Upload date <= YYYY-MM-DD (inclusive)")
+    p.add_argument("--count-only", action="store_true",
+                   help="Return only the match count (exact unless the ceiling is hit)")
+    p.add_argument("--limit", type=int, default=25, help="Rows per page (default 25, max 200)")
+    p.add_argument("--offset", type=int, default=0, help="Skip N rows")
 
     p = files_sub.add_parser(
         "content",

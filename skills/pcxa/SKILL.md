@@ -94,7 +94,11 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 
 ```bash
 pcxa files list --ext PDF --search "keyword" --limit 50  # title trigram (fuzzy by default; exact first)
-pcxa files list --search "concret" --exact               # tight substring only — `concret` will NOT match `Concrete`
+pcxa files list --search "concret" --exact               # tighter title match (still AND-matches words, NOT a phrase)
+pcxa files query 'title:schedule AND precast AND delay'  # BOOLEAN: AND/OR/NOT + grouping, exhaustive + exact count
+pcxa files query 'title:report AND (delay OR "change order")'   # grouping + quoted phrase
+pcxa files query 'contract NOT draft' --ext PDF          # exclusion (impossible with --search/--content)
+pcxa files query 'title:"Case Memo"' --count-only        # true LITERAL phrase on the filename
 pcxa files list --content "IOCC-387"                     # literal substring in file BODY — every match, paginated (stable id order)
 pcxa files list --content "IOCC-387" --count-only        # exact total of content matches (count:0 = genuinely not located)
 pcxa files list --tags "urgent,review" --tags-mode all   # AND: files with ALL tags
@@ -142,16 +146,22 @@ pcxa files list --tags to_delete                         # list everything pendi
 
 Search results include `url` fields — always show these to users for document links.
 
-**`--search` is fuzzy by default (`files list`, `files aggregate`, `activities list`).** Backend uses PostgreSQL trigram similarity: exact substring matches surface first (similarity ~1.0), then typo-tolerant matches ranked by similarity DESC, in a single paginated response. `concret` finds `Concrete Pour`; `0314` ranks `RFI-0314` above `Document-031499`. Pass `--exact` to opt back into tight substring matching (rejects typos — useful when the query is a known-correct identifier and you don't want fuzzy noise). The backend rate-limits fuzzy search to 100/min per user; not normally a concern for agent use.
+**`--search` is fuzzy by default (`files list`, `files aggregate`, `activities list`).** Backend uses PostgreSQL trigram similarity: exact substring matches surface first (similarity ~1.0), then typo-tolerant matches ranked by similarity DESC, in a single paginated response. `concret` finds `Concrete Pour`; `0314` ranks `RFI-0314` above `Document-031499`. Pass `--exact` to opt back into tight substring matching (rejects typos — useful when the query is a known-correct identifier and you don't want fuzzy noise). **`--exact` is not a phrase match:** the words are still AND-matched separately, so `--search "Case Memo" --exact` also matches `Case Assessment Memorandum`. When you need a literal adjacent phrase in the filename, use `pcxa files query 'title:"Case Memo"'`. The backend rate-limits fuzzy search to 100/min per user; not normally a concern for agent use.
+
+**`files query` response shape:** `{query, parsed, results, total_files, count_exact, limit, offset}`. `parsed` is the canonical interpretation of your expression — surface it to the user when the result set matters. `count_exact: false` means `total_files` is a floor (ceiling reached), not a total. Rows carry `file_id`, `file_name`, `file_type`, `folder_path`, and a `url`.
 
 **Search response shape:** `pcxa files search` returns `{query, total_results, results, hybrid_enabled}` — a top-N reranked list (server-capped at 50). Each row carries `score`, `file_id`/`activity_id`, `file_name`/`title`, `folder_path`, `page_number`, `chunk_position`, and a `url`. Hybrid means the result is the union of Pinecone semantic similarity and BM25 over the project's chunk text, RRF-fused and Cohere-reranked — the same path the web UI's search bar uses.
 
-**Three ways to find files — pick by what you need:**
+**Four ways to find files — pick by what you need:**
 - **`files list --search <term>`** — matches the **title/filename** only (trigram). Paginated + countable. Use when you know part of the name.
 - **`files list --content <term>`** — matches the indexed **body/contents** as a **literal substring** (not ranked, not semantic). Paginated + **countable and exhaustive**: `--content <term> --count-only` gives the *exact* total and you can page through *every* match in a stable order (by `id`). `count: 0` means the term is genuinely in no in-scope file — so this is the path for a "not located" / completeness finding. Use it to find files by what's inside them — e.g. an eDiscovery estate where emails are named by bare Bates numbers (`YATES002119058`) and the term only appears in the body. Only indexed files match; scope with `--folder`/`--ext`/`--index-status`.
 - **`files search <term>` / `files content <term>`** — hybrid semantic + keyword **ranking** (relevance-ordered), a **top-50 reranked sample, not a total**. Best for natural-language / "most relevant" lookups. Do **not** use it to count or enumerate — it can't page past 50, and asking for more (`--limit 200`) is clamped to 50 with a notice pointing you at `--content`. For "how many / list them all", use `--content`.
 
-`--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc.
+- **`files query '<expr>'`** — **boolean** search: `AND` / `OR` / `NOT`, parentheses for grouping, `title:` / `content:` field scoping, and `"quoted phrases"` matched adjacently. Exhaustive with an **exact count**, like `--content`, but structurally expressive. Use it whenever the question has more than one condition — *"schedule in the title AND both precast and delay in the body"* is one call: `pcxa files query 'title:schedule AND precast AND delay'`. Bare terms search content; operators must be UPPERCASE (lowercase `and`/`or` are ordinary words). Every response echoes `parsed` — **read it** to confirm the query was understood before trusting the results.
+
+`--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc. For anything beyond a plain AND of one title term and one body term, reach for `files query` instead.
+
+**`files query` limits (all reported, never silent):** at most 8 OR branches, 4 levels of nesting, 16 terms. A bare `NOT` is rejected — negation needs something positive to search within (`contract NOT draft`, not `NOT draft`). An `OR` whose branches are **two or more very common** content words is rejected as too broad with an actionable message; narrow one branch or run them separately. `count_exact: false` means a ceiling was hit and the number is a floor, not a total.
 
 **Paging through the matches (`--limit` / `--offset`).** Every `... list` subcommand — `files list`, `activities list`, `forms list`, `submissions list`, `custom-objects list`, `resources list`, `cost-codes list`, `budgets list`, `timesheets list` — returns **one page at a time**, defaulting to 25 or 50 rows. **A bare `list` call is never the complete set.** To enumerate everything, get the total first, then walk it:
 
