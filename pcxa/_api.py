@@ -69,10 +69,15 @@ def _decode_jwt_exp(token):
 class APIClient:
     """HTTP client for pcxa REST API with JWT auth and auto-refresh."""
 
-    def __init__(self, profile, profile_name, config):
+    def __init__(self, profile, profile_name, config, timeout=None):
         self.profile = profile
         self.profile_name = profile_name
         self.config = config
+        # Per-run read timeout (``pcxa --timeout``). ``None`` defers to
+        # ``_http.get_default_timeout()`` so PCXA_HTTP_TIMEOUT and the
+        # built-in 30s fallback stay in one place instead of being
+        # re-hard-coded here (PCX-Analytics/pcxa#1689, #1454).
+        self.timeout = timeout
         self.base_url = profile["url"].rstrip("/")
         self.company_id = profile.get("company")
         self.project_id = profile.get("project")
@@ -208,7 +213,8 @@ class APIClient:
         return f"{self.base_url}/api/companies/{self.company_id}/{path}"
 
     def _request(self, method, url, **kwargs):
-        kwargs.setdefault("timeout", 30)
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self.timeout  # None → _http applies the default
         self._maybe_proactive_refresh()
         resp = self.session.request(method, url, **kwargs)
         if resp.status_code in (401, 403) and self.profile.get("auth") == "jwt":
@@ -227,18 +233,27 @@ class APIClient:
         resp.raise_for_status()
         return resp
 
-    def get(self, path, params=None, project_scoped=True):
+    def get(self, path, params=None, project_scoped=True, timeout=None):
         url = self._url(path, project_scoped=project_scoped)
-        return self._request("GET", url, params=params).json()
+        return self._request("GET", url, params=params, timeout=timeout).json()
 
-    def post(self, path, json_data=None, project_scoped=True):
-        return self._request("POST", self._url(path, project_scoped=project_scoped), json=json_data).json()
+    def post(self, path, json_data=None, project_scoped=True, timeout=None):
+        return self._request(
+            "POST", self._url(path, project_scoped=project_scoped),
+            json=json_data, timeout=timeout,
+        ).json()
 
-    def patch(self, path, json_data=None, project_scoped=True):
-        return self._request("PATCH", self._url(path, project_scoped=project_scoped), json=json_data).json()
+    def patch(self, path, json_data=None, project_scoped=True, timeout=None):
+        return self._request(
+            "PATCH", self._url(path, project_scoped=project_scoped),
+            json=json_data, timeout=timeout,
+        ).json()
 
-    def delete(self, path, json_data=None, project_scoped=True):
-        resp = self._request("DELETE", self._url(path, project_scoped=project_scoped), json=json_data)
+    def delete(self, path, json_data=None, project_scoped=True, timeout=None):
+        resp = self._request(
+            "DELETE", self._url(path, project_scoped=project_scoped),
+            json=json_data, timeout=timeout,
+        )
         if resp.status_code == 204:
             return {}
         try:
@@ -250,13 +265,20 @@ class APIClient:
         return self._request("GET", url, params=params).json()
 
     def bulk_call(self, path, ids_key, ids, base_payload=None,
-                  chunk=500, method="POST", project_scoped=True, on_chunk=None):
+                  chunk=500, method="POST", project_scoped=True, on_chunk=None,
+                  timeout=None):
         """Call a bulk endpoint in chunks, aggregating ``success_count``,
         ``error_count``, and ``errors`` across chunks.
 
         Always routes through ``_request`` so long-running jobs get JWT
         auto-refresh — use this instead of ``c.session.*`` for any bulk
         operation that may exceed the access-token TTL (issue #562).
+
+        ``timeout`` overrides the client default for these chunks; leave it
+        None to inherit ``pcxa --timeout`` / ``PCXA_HTTP_TIMEOUT``. Bulk
+        mutations are the slowest calls the CLI makes, and until this
+        existed there was no way to give them more than the 30s default
+        (PCX-Analytics/pcxa#1454).
 
         ``on_chunk(start_index, batch_size, total, response_data)`` fires
         after each chunk, useful for progress output.
@@ -268,7 +290,7 @@ class APIClient:
         for i in range(0, len(ids), chunk):
             batch = ids[i:i + chunk]
             payload = dict(base, **{ids_key: batch})
-            resp = self._request(method, url, json=payload)
+            resp = self._request(method, url, json=payload, timeout=timeout)
             try:
                 data = {} if resp.status_code == 204 else resp.json()
             except Exception:

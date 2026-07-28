@@ -11,7 +11,7 @@ import sys
 
 from pcxa._api import APIClient
 from pcxa._config import get_profile, load_config
-from pcxa._http import requests
+from pcxa._http import requests, set_default_timeout
 from pcxa._parser import build_parser
 from pcxa._resolve import resolve_ids
 from pcxa._update import _check_for_update, _print_update_notice
@@ -346,10 +346,19 @@ def main():
                 _print_update_notice(_check_for_update())
         return
 
+    # `--timeout` is a transport-level knob, so push it into _http as well as
+    # the client: helpers that reach for `_http.requests` directly (uploads,
+    # presign PUTs) never see the APIClient.
+    http_timeout = getattr(args, "http_timeout", None)
+    if http_timeout is not None:
+        if http_timeout <= 0:
+            print(f"Ignoring --timeout {http_timeout} (must be > 0).", file=sys.stderr)
+        http_timeout = set_default_timeout(http_timeout)
+
     config = load_config()
     profile_name = args.profile or config.get("default_profile")
     _, profile = get_profile(config, profile_name)
-    client = APIClient(profile, profile_name, config)
+    client = APIClient(profile, profile_name, config, timeout=http_timeout)
     resolve_ids(client)
 
     try:
