@@ -294,6 +294,86 @@ def cmd_files_batch_read(client, args):
                 print(f"      {line}")
 
 
+def cmd_files_query(client, args):
+    """Boolean file search — AND / OR / NOT, grouping, field scoping, phrases.
+
+    Routes through ``semantic-search/boolean-search/``. This is the *precise*
+    channel: unlike ``files search`` (a relevance-ranked, 50-capped sample) it
+    returns an exhaustive result set with an exact count, and unlike
+    ``files list --search/--content`` it can express real boolean structure.
+
+        pcxa files query 'title:schedule AND precast AND delay'
+        pcxa files query 'title:report AND (delay OR "change order")'
+        pcxa files query 'contract NOT draft' --ext PDF
+
+    A quoted term is matched as an adjacent phrase, so
+    ``title:"Case Memo"`` is a true literal substring match on the filename —
+    which is what ``files list --search --exact`` does NOT give you (it
+    AND-matches the words separately; see --exact's help).
+    """
+    params = {"q": args.query, "limit": args.limit, "offset": args.offset}
+    if args.ext:
+        params["file_types"] = args.ext
+    if args.folder:
+        params["folder_id"] = args.folder
+    for cli_name, api_name in (
+        ("doc_date_from", "document_date_from"),
+        ("doc_date_to", "document_date_to"),
+        ("created_from", "created_from"),
+        ("created_to", "created_to"),
+    ):
+        value = getattr(args, cli_name, None)
+        if value:
+            params[api_name] = value
+
+    data = client.get("semantic-search/boolean-search/", params)
+
+    for r in data.get("results", []):
+        fid = r.get("file_id")
+        if fid:
+            r["url"] = client.file_url(fid)
+
+    if args.count_only:
+        print(json.dumps({"count": data.get("total_files"), "exact": data.get("count_exact")}))
+        return
+
+    if args.format == "json":
+        out_json(data)
+        return
+
+    _print_boolean_results(data)
+
+
+def _print_boolean_results(data):
+    """Render a ``boolean-search`` response.
+
+    Always shows how the query was PARSED and whether the count is exact.
+    Both are the point of this command: a result set you cannot verify the
+    interpretation of is not one you can cite in work product.
+    """
+    results = data.get("results") or []
+    total = data.get("total_files", len(results))
+    exact = data.get("count_exact", True)
+    count_label = str(total) if exact else f"{total}+ (ceiling reached — narrow the query for an exact count)"
+
+    print(f"Parsed as: {data.get('parsed', '(unknown)')}")
+    print(f"Matches:   {count_label}\n")
+    if not results:
+        print("  (no results — count:0 means genuinely not located, not truncated)")
+        return
+    rows = [
+        {
+            "id": str(r.get("file_id", "")),
+            "name": str(r.get("file_name") or "")[:50],
+            "type": r.get("file_type", ""),
+            "folder": (r.get("folder_path") or "/")[:30],
+            "url": r.get("url", ""),
+        }
+        for r in results
+    ]
+    out_table(rows, ["id", "name", "type", "folder", "url"])
+
+
 def cmd_files_content(client, args):
     """Keyword search in indexed file text.
 

@@ -37,6 +37,7 @@ from pcxa.commands.files import (
     cmd_files_list,
     cmd_files_read,
     cmd_files_recent,
+    cmd_files_query,
     cmd_files_search,
     cmd_files_stats,
     cmd_files_upload,
@@ -199,6 +200,7 @@ SUB_HANDLERS = {
     "project": {"get": cmd_project_get, "update": cmd_project_update, "members": cmd_project_members},
     "files": {
         "list": cmd_files_list, "search": cmd_files_search, "content": cmd_files_content,
+        "query": cmd_files_query,
         "read": cmd_files_read, "batch-read": cmd_files_batch_read,
         "info": cmd_files_info, "stats": cmd_files_stats,
         "aggregate": cmd_files_aggregate, "recent": cmd_files_recent, "download": cmd_files_download,
