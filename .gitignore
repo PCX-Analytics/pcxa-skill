@@ -19,3 +19,6 @@ venv/
 !.vscode/tasks.json
 .idea/
 .DS_Store
+
+# Claude Code local state (settings.local.json, worktrees)
+.claude/
