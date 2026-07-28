@@ -108,9 +108,12 @@ def build_parser():
     # similarity DESC. When --search is absent we fall back to -created_at
     # in cmd_files_list. An explicit --sort always wins.
     p.add_argument("--sort", default=None, help="Sort field (default: -created_at; similarity when --search)")
-    p.add_argument("--count-only", action="store_true")
-    p.add_argument("--limit", type=int, default=25)
-    p.add_argument("--offset", type=int, default=0)
+    p.add_argument("--count-only", action="store_true",
+                   help="Return only the exact total match count (run before paging)")
+    p.add_argument("--limit", type=int, default=25, help="Rows per page (default 25)")
+    p.add_argument("--offset", type=int, default=0,
+                   help="Skip N rows — page by incrementing --offset by --limit until "
+                        "you have --count-only rows")
 
     p = files_sub.add_parser(
         "search",

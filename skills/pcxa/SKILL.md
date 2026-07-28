@@ -153,6 +153,16 @@ Search results include `url` fields — always show these to users for document 
 
 `--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc.
 
+**Paging through the matches (`--limit` / `--offset`).** Every `... list` subcommand — `files list`, `activities list`, `forms list`, `submissions list`, `custom-objects list`, `resources list`, `cost-codes list`, `budgets list`, `timesheets list` — returns **one page at a time**, defaulting to 25 or 50 rows. **A bare `list` call is never the complete set.** To enumerate everything, get the total first, then walk it:
+
+```bash
+pcxa files list --content "IOCC-387" --count-only              # {"count": 137} ← the real total
+pcxa files list --content "IOCC-387" --limit 100 --offset 0    # rows 1–100
+pcxa files list --content "IOCC-387" --limit 100 --offset 100  # rows 101–137
+```
+
+Increment `--offset` by `--limit` until you've collected `count` rows (or a page comes back short). With `--content` the order is by `id`, so paging is exhaustive — exactly `count` distinct ids, no repeats or skips. Report the number from `--count-only`, never the length of one page.
+
 **After search → read in batch.** Once `files search` returns the rows, prefer `files batch-read --chunk file_id:chunk_position` over N single `files read` calls. Each row carries a `chunk_position` — pass `file_id:chunk_position` as `--chunk` to read just the relevant excerpt + neighbors. One round trip instead of N. Use `--outline` for section maps when files are large and you need to plan further reads.
 
 For folder-scoped browsing, use `pcxa files list --folder <id>`.
