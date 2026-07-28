@@ -5,7 +5,7 @@ Public surface:
     __version__    — current package version
 """
 
-__version__ = "0.6.8"
+__version__ = "0.6.9"
 
 # main() is wired in pcxa._main once the package is fully assembled. Imports
 # are deferred to keep package import cheap and avoid pulling argparse on
