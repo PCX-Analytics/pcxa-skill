@@ -357,7 +357,15 @@ def _print_boolean_results(data):
     count_label = str(total) if exact else f"{total}+ (ceiling reached — narrow the query for an exact count)"
 
     print(f"Parsed as: {data.get('parsed', '(unknown)')}")
-    print(f"Matches:   {count_label}\n")
+    print(f"Matches:   {count_label}")
+    # Surface the chunk-scope caveat where the number is read, not just in
+    # --help. An AND result is a floor; saying so is what keeps a "not found"
+    # from being mistaken for a complete negative finding.
+    parsed = data.get("parsed") or ""
+    if " AND " in parsed and "content:" in parsed:
+        print("Note:      content AND matches within a ~3000-char passage, so this "
+              "count is a FLOOR, not a complete set.")
+    print()
     if not results:
         print("  (no results — count:0 means genuinely not located, not truncated)")
         return

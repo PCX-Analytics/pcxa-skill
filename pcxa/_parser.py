@@ -163,7 +163,10 @@ def build_parser():
     p.add_argument("query",
                    help='Boolean expression, e.g. \'title:report AND (delay OR "change order")\'. '
                         'Fields: title (alias name), content. Bare terms search content. '
-                        'Operators are UPPERCASE. Quote a term to match it as an adjacent phrase.')
+                        'Operators are UPPERCASE. Quote a term to match it as an adjacent phrase. '
+                        'CAVEAT: content AND currently requires both terms in the SAME ~3000-char '
+                        'passage, not merely the same file — it under-reports by 60-70%%, so treat '
+                        'an AND result as a floor, not a complete set.')
     p.add_argument("--ext", help="File type filter (csv, e.g. PDF,DOCX)")
     p.add_argument("--folder", type=int, help="Folder ID (includes subtree)")
     p.add_argument("--doc-date-from", dest="doc_date_from",

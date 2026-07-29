@@ -164,6 +164,10 @@ Search results include `url` fields — always show these to users for document 
 
 `--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc. For anything beyond a plain AND of one title term and one body term, reach for `files query` instead.
 
+**⚠️ `AND` currently means "same passage", not "same file".** Two terms joined by `AND` must appear within the same ~3,000-character chunk of a document, not merely somewhere in the same file. Measured on a real corpus this under-reports by **60-70%**: `rebar AND delay` returns 1,042 files where 3,496 actually contain both words. It never returns a wrong file — it silently omits correct ones.
+
+Until this is fixed (blocked on a backend index change), treat an `AND` result as a **floor, not a complete set**, and do not use it alone to support a "not found" conclusion. To widen recall, search each term separately with `files list --content <term> --count-only` and intersect the ids yourself.
+
 **`files query` limits (all reported, never silent):** at most 8 OR branches, 4 levels of nesting, 16 terms. A bare `NOT` is rejected — negation needs something positive to search within (`contract NOT draft`, not `NOT draft`). An `OR` whose branches are **two or more very common** content words is rejected as too broad with an actionable message; narrow one branch or run them separately. `count_exact: false` means a ceiling was hit and the number is a floor, not a total.
 
 **Paging through the matches (`--limit` / `--offset`).** Every `... list` subcommand — `files list`, `activities list`, `forms list`, `submissions list`, `custom-objects list`, `resources list`, `cost-codes list`, `budgets list`, `timesheets list` — returns **one page at a time**, defaulting to 25 or 50 rows. **A bare `list` call is never the complete set.** To enumerate everything, get the total first, then walk it:
