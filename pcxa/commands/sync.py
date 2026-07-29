@@ -287,6 +287,14 @@ def cmd_files_sync(client, args):
         "created": 0,
         "duplicate": 0,
         "error": 0,
+        # Distinct failure EVENTS, which is what --max-failures budgets against.
+        # ``error`` counts FILES that didn't land and stays the honest
+        # user-facing number; a single batch-level fault (bulk-register 5xx, a
+        # dropped DB connection server-side) fails up to BULK_REGISTER_FLUSH_SIZE
+        # files at once but is ONE event. Budgeting on ``error`` meant one brief
+        # backend blip burned the whole budget and aborted a multi-hour sync
+        # (pcxa#1699 / #1730).
+        "failure_events": 0,
         "failures": [],
         "aborted_max_failures": False,
         "concurrency_final": initial_concurrency,
@@ -341,7 +349,8 @@ def cmd_files_sync(client, args):
         )
         if summary["aborted_max_failures"]:
             print(
-                f"  Aborted: failure budget exceeded ({max_failures}).",
+                f"  Aborted: failure budget exceeded "
+                f"({summary['failure_events']}/{max_failures} failure events).",
                 file=sys.stderr,
             )
         if summary["failures"]:
@@ -820,6 +829,37 @@ def _adaptive_part_size(file_size, requested_part_size):
 # ───────────────────────── bulk-presign helpers ─────────────────────────
 
 
+def _record_batch_failure(summary, items, message):
+    """Account for one fault that failed a whole bulk-register batch.
+
+    ``error`` counts FILES that didn't land — all of them, since none did, and
+    that stays the honest user-facing number.
+
+    ``failure_events`` counts ONE, because this was a single fault (a 5xx, a
+    dropped server-side DB connection, a malformed response), not len(items)
+    independent problems. ``--max-failures`` budgets against events: charging
+    it per file meant one brief backend blip could fail a 50-file batch, blow
+    a 100-failure budget in two flushes, and abort an otherwise-healthy
+    multi-hour sync (pcxa#1699 / #1730).
+    """
+    summary["error"] += len(items)
+    summary["failure_events"] += 1
+    for it in items:
+        summary["failures"].append({
+            "name": it.get("original_filename", "?"),
+            "error": message,
+        })
+
+
+def _budget_exhausted(summary, max_failures):
+    """True when ``--max-failures`` has been spent.
+
+    Budgets FAILURE EVENTS, not failed files — see ``_record_batch_failure``.
+    ``max_failures == 0`` disables the budget entirely.
+    """
+    return bool(max_failures) and summary["failure_events"] >= max_failures
+
+
 def _content_type_for(name):
     import mimetypes
     return mimetypes.guess_type(name)[0] or "application/octet-stream"
@@ -1013,12 +1053,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                 return
             except _requests.ConnectionError as exc:
                 if attempt == BULK_REGISTER_RETRIES - 1:
-                    summary["error"] += len(items)
-                    for it in items:
-                        summary["failures"].append({
-                            "name": it.get("original_filename", "?"),
-                            "error": f"bulk-register: {exc}",
-                        })
+                    _record_batch_failure(summary, items, f"bulk-register: {exc}")
                     _log_error(
                         phase="bulk_register",
                         name=f"<batch of {len(items)}>",
@@ -1051,13 +1086,11 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                         and attempt < BULK_REGISTER_RETRIES - 1:
                     time.sleep(2 ** attempt)
                     continue
-                summary["error"] += len(items)
-                for it in items:
-                    summary["failures"].append({
-                        "name": it.get("original_filename", "?"),
-                        "error": f"bulk-register: {exc}"
-                                 + (f" detail={detail}" if detail else ""),
-                    })
+                _record_batch_failure(
+                    summary,
+                    items,
+                    f"bulk-register: {exc}" + (f" detail={detail}" if detail else ""),
+                )
                 _log_error(
                     phase="bulk_register",
                     name=f"<batch of {len(items)}>",
@@ -1074,7 +1107,10 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
             s = data.get("summary", {})
             summary["created"] += s.get("created", 0)
             summary["duplicate"] += s.get("duplicate", 0)
+            # Genuine per-row rejections (bad storage key, junk filename...).
+            # These ARE independent failures, so each one is its own event.
             summary["error"] += s.get("error", 0)
+            summary["failure_events"] += s.get("error", 0)
             results = data.get("results") or []
             for row in results:
                 idx = row.get("index")
@@ -1113,12 +1149,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                         "uploaded_at": datetime.now(timezone.utc).isoformat(),
                     }
         except Exception as exc:
-            summary["error"] += len(items)
-            for it in items:
-                summary["failures"].append({
-                    "name": it.get("original_filename", "?"),
-                    "error": f"bulk-register: {exc}",
-                })
+            _record_batch_failure(summary, items, f"bulk-register: {exc}")
 
     def _maybe_flush():
         with pending_lock:
@@ -1452,6 +1483,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                 state["since_manifest_save"] += 1
         except Exception as exc:
             summary["error"] += 1
+            summary["failure_events"] += 1  # one file, one event
             summary["failures"].append({
                 "name": entry["name"], "error": str(exc),
             })
@@ -1481,13 +1513,13 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                 size=entry.get("size"),
             )
         _render()
-        if max_failures and summary["error"] >= max_failures \
-                and not interrupted.is_set():
+        if _budget_exhausted(summary, max_failures) and not interrupted.is_set():
             interrupted.set()
             summary["aborted_max_failures"] = True
             _log_autotune(
                 f"[abort] failure budget exceeded "
-                f"({summary['error']}/{max_failures}) — stopping."
+                f"({summary['failure_events']}/{max_failures} failure events, "
+                f"{summary['error']} files) — stopping."
             )
 
     # Cap on submitted-but-not-completed work. The slots semaphore is
@@ -1523,6 +1555,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                         # Per-item bulk-presign failure — surface
                         # immediately, no pool submit.
                         summary["error"] += 1
+                        summary["failure_events"] += 1  # one file, one event
                         summary["failures"].append({
                             "name": entry["name"],
                             "error": f"bulk-presign: {key_or_err}",
