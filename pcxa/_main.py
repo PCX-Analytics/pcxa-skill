@@ -7,11 +7,12 @@ company/project IDs.
 """
 
 import json
+import math
 import sys
 
 from pcxa._api import APIClient
 from pcxa._config import get_profile, load_config
-from pcxa._http import requests
+from pcxa._http import requests, set_default_timeout
 from pcxa._parser import build_parser
 from pcxa._resolve import resolve_ids
 from pcxa._update import _check_for_update, _print_update_notice
@@ -346,10 +347,30 @@ def main():
                 _print_update_notice(_check_for_update())
         return
 
+    # `--timeout` feeds both the client (which covers every APIClient call) and
+    # the transport default. The transport default is a FLOOR for helpers that
+    # call `_http.requests` directly without naming a timeout of their own.
+    #
+    # It does not reach today's upload/download/presign helpers: every one of
+    # them passes an explicit timeout (60-600s), and an explicit value wins over
+    # the default. Raising those with `--timeout` would mean a `_long_timeout`-
+    # style max() at each call site — deliberately not done here, since they
+    # already sit far above the 30s that motivated this change. Tracked
+    # separately; don't let this comment drift into claiming otherwise.
+    http_timeout = getattr(args, "http_timeout", None)
+    if http_timeout is not None:
+        # Reject non-finite values before they reach socket.settimeout, where
+        # inf raises OverflowError and nan slips past a plain `<= 0` check.
+        if not math.isfinite(http_timeout) or http_timeout <= 0:
+            print(f"Ignoring --timeout {http_timeout} (must be a finite value > 0).", file=sys.stderr)
+            http_timeout = None
+        else:
+            http_timeout = set_default_timeout(http_timeout)
+
     config = load_config()
     profile_name = args.profile or config.get("default_profile")
     _, profile = get_profile(config, profile_name)
-    client = APIClient(profile, profile_name, config)
+    client = APIClient(profile, profile_name, config, timeout=http_timeout)
     resolve_ids(client)
 
     try:

@@ -176,6 +176,24 @@ pcxa progress add 123 --percent 50 --notes "Reviewed shop drawings"
 
 Run `pcxa <command> --help` for the full option list.
 
+### Timeouts on slow projects
+
+Every API call uses a 30-second read timeout by default. On large projects
+some endpoints legitimately run longer than that — folder creation and bulk
+mutations are the usual suspects — and the CLI can't tell "slow" from "dead".
+Raise the ceiling with `--timeout` (accepted before or after the subcommand)
+or with `PCXA_HTTP_TIMEOUT` for the whole shell:
+
+```bash
+pcxa --timeout 300 files sync /path/to/tree --folder 5
+pcxa files purge --ids-file ids.txt --timeout 300 --yes
+export PCXA_HTTP_TIMEOUT=300
+```
+
+`files sync` additionally retries folder create/lookup with backoff, and
+adopts an existing folder when a timed-out create turns out to have landed
+server-side — so one slow call no longer aborts a multi-hour run.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).

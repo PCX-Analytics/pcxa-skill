@@ -12,6 +12,23 @@ from pcxa.commands.activities import MAX_TAG_FILTER_TAGS, TAG_FILTER_MODES
 from pcxa.commands.tags_folders import DELETION_TAG
 
 
+_HTTP_TIMEOUT_HELP = (
+    "HTTP read timeout in seconds for every API call (default: 30, or "
+    "$PCXA_HTTP_TIMEOUT). Same knob as the top-level `pcxa --timeout`."
+)
+
+
+def _add_http_timeout(p):
+    """Attach a subcommand-level alias for the global ``--timeout``.
+
+    argparse copies a subparser's defaults over the parent namespace, so the
+    alias must use SUPPRESS — otherwise `pcxa --timeout 300 files sync ...`
+    would silently reset to None the moment the subparser ran.
+    """
+    p.add_argument("--timeout", dest="http_timeout", type=float,
+                   default=argparse.SUPPRESS, help=_HTTP_TIMEOUT_HELP)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="pcxa",
@@ -21,6 +38,12 @@ def build_parser():
     parser.add_argument("--profile", "-p", default=None, help="Config profile")
     parser.add_argument("--format", "-f", choices=["json", "table"], default="json", help="Output format")
     parser.add_argument("--dry-run", action="store_true", help="Preview without changes")
+    parser.add_argument(
+        "--timeout", dest="http_timeout", type=float, default=None,
+        help="HTTP read timeout in seconds for every API call (default: 30, "
+             "or $PCXA_HTTP_TIMEOUT). Raise it on projects where writes are "
+             "slow — folder creates and bulk mutations regularly run past 30s.",
+    )
     parser.add_argument("--version", "-V", action="version", version=f"pcxa {__version__}")
 
     sub = parser.add_subparsers(dest="command", help="Commands")
@@ -311,6 +334,7 @@ def build_parser():
                         "throughput / high-error runs — failures normally "
                         "only surface in the end-of-run summary, which is "
                         "useless mid-run.")
+    _add_http_timeout(p)
     p.add_argument("--stats-interval", dest="stats_interval", type=float,
                    default=0.0,
                    help="If >0, emit a JSON stats line to stderr every N "
@@ -352,6 +376,7 @@ def build_parser():
     p.add_argument("--chunk", type=int, default=500,
                    help="Chunk size for bulk_delete (default 500).")
     p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
+    _add_http_timeout(p)
 
     p = files_sub.add_parser(
         "bulk-patch",

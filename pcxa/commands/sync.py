@@ -19,6 +19,7 @@ import fnmatch
 import json
 import math
 import os
+import random
 import sys
 import threading
 import time
@@ -48,6 +49,19 @@ EXISTING_FILES_WORKERS = 6
 BULK_REGISTER_TIMEOUT = 180
 BULK_REGISTER_RETRIES = 3
 BULK_REGISTER_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+# Folder create/list is slow enough on big projects to blow the default
+# client timeout on its own (`POST folders/` measured ~9s, `GET
+# folders/{id}/` ~7.7s — PCX-Analytics/pcxa#1648), so it gets both a longer
+# ceiling and a retry budget. Without the retry, one unlucky call aborted a
+# 389k-file run before a single byte moved (PCX-Analytics/pcxa#1689).
+FOLDER_OP_TIMEOUT = 180
+FOLDER_OP_RETRIES = 4
+FOLDER_OP_RETRY_BASE_DELAY = 1.0
+FOLDER_OP_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+# A create that comes back 400/409 is usually "a folder with this name
+# already exists under this parent" — i.e. our own timed-out attempt landed.
+# Re-resolve by name before deciding it's a real validation error.
+FOLDER_CONFLICT_STATUSES = frozenset({400, 409})
 MANIFEST_CHECKPOINT_SECONDS = 30
 MANIFEST_CHECKPOINT_FILES = 50
 R2_MAX_PARTS = 10000
@@ -114,10 +128,18 @@ def cmd_files_sync(client, args):
         return
 
     # Pre-flight: confirm the target folder actually exists so we don't
-    # discover the typo 4 hours into a TB upload.
+    # discover the typo 4 hours into a TB upload. Retried — this GET is one
+    # of the slow ones (~7.7s measured), and a transport hiccup here is not
+    # evidence the folder is missing.
     if root_folder_id is not None:
         try:
-            client.get(f"folders/{root_folder_id}/")
+            _folder_call_with_retry(
+                lambda: client.get(
+                    f"folders/{root_folder_id}/",
+                    timeout=_long_timeout(client, FOLDER_OP_TIMEOUT),
+                ),
+                f"folders/{root_folder_id}/",
+            )
         except AuthExpiredError as exc:
             print(f"Token expired: {exc}", file=sys.stderr)
             sys.exit(2)
@@ -125,11 +147,51 @@ def cmd_files_sync(client, args):
             print(f"Target folder id={root_folder_id} not accessible: {exc}",
                   file=sys.stderr)
             sys.exit(1)
+        except _requests.ConnectionError as exc:
+            print(f"Could not reach folders/{root_folder_id}/ after "
+                  f"{FOLDER_OP_RETRIES} attempts: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     print("Resolving target folders...", file=sys.stderr)
     rel_dirs = sorted({e["relative_dir"] for e in entries},
                       key=lambda x: (x.count("/"), x))
-    rel_dir_to_folder_id = _resolve_or_create_folders(client, rel_dirs, root_folder_id)
+    # Folder ids resolved by a previous run are only reusable if that run
+    # targeted the same root — otherwise the same relative dir means a
+    # different folder.
+    if (manifest.get("output_folder_id") != root_folder_id
+            or not isinstance(manifest.get("folders"), dict)):
+        manifest["folders"] = {}
+    resolved_folders = manifest["folders"]
+    known_folders = {k: v for k, v in resolved_folders.items()
+                     if isinstance(v, int)}
+    if known_folders:
+        print(f"  {len(known_folders)} folders already resolved by a previous run.",
+              file=sys.stderr)
+
+    def _record_folder(rel_dir, folder_id):
+        resolved_folders[rel_dir] = folder_id
+
+    try:
+        rel_dir_to_folder_id = _resolve_or_create_folders(
+            client, rel_dirs, root_folder_id,
+            known=known_folders, on_resolved=_record_folder,
+        )
+    except Exception as exc:
+        # Folder resolution runs before any upload, so a failure here used to
+        # leave nothing behind — the whole multi-hour run restarted from zero.
+        # Checkpoint whatever we did resolve so the retry picks up mid-tree.
+        if manifest_path and resolved_folders:
+            _save_manifest(manifest_path, manifest, input_root, root_folder_id)
+            print(f"Folder resolution failed after resolving "
+                  f"{len(resolved_folders)} folders — progress saved to "
+                  f"{manifest_path}; re-run to continue.", file=sys.stderr)
+        if isinstance(exc, _requests.ConnectionError):
+            # The #1689 failure mode. A traceback here reads like a bug in the
+            # CLI; it's a slow server, so say so and exit cleanly.
+            print(f"Folder resolution failed: {exc}. Retry, or raise the "
+                  f"ceiling with `pcxa --timeout <seconds>`.", file=sys.stderr)
+            sys.exit(1)
+        raise
 
     target_folder_ids = {fid for fid in rel_dir_to_folder_id.values() if fid is not None}
     if getattr(args, "trust_manifest", False):
@@ -320,19 +382,146 @@ def _collect_files(input_root, includes, excludes, skip_hidden):
     return entries
 
 
-def _resolve_or_create_folders(client, rel_dirs, root_folder_id):
+def _long_timeout(client, floor):
+    """Read timeout for a call we already know needs longer than the default.
+
+    Returns ``floor``, or the run's ``--timeout`` when the operator asked for
+    something larger. A *smaller* ``--timeout`` never lowers these paths —
+    they're slow by nature and the whole point of the floor is that they
+    don't inherit a ceiling we know they'll cross.
+    """
+    return max(floor, getattr(client, "timeout", None) or 0)
+
+
+def _folder_call_with_retry(fn, what, attempts=FOLDER_OP_RETRIES):
+    """Run a folder API read with exponential backoff on transient failures.
+
+    Transient means ConnectionError (which is what a read timeout surfaces
+    as — the failure mode in PCX-Analytics/pcxa#1689), 429, and 5xx.
+    Everything else — 401/403 auth, 404, 400 validation — raises on the
+    first attempt: retrying those just burns wall clock before the same
+    error.
+    """
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except _requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", 0)
+            if status not in FOLDER_OP_RETRY_STATUSES:
+                raise
+            last_exc = exc
+        except (_requests.ConnectionError, OSError) as exc:
+            last_exc = exc
+        if attempt < attempts - 1:
+            delay = FOLDER_OP_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.25)
+            print(
+                f"  {what} failed ({last_exc}) — retrying in {delay:.1f}s "
+                f"[{attempt + 2}/{attempts}]",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+    raise last_exc
+
+
+def _create_folder_with_retry(client, name, parent_id, relookup):
+    """Create folder ``name`` under ``parent_id``, adopting an existing one.
+
+    Retries are safe because the operation is idempotent on (name, parent):
+    a POST whose *read* timed out may still have committed server-side, so
+    every attempt after the first re-resolves by name and adopts whatever it
+    finds instead of creating a duplicate. Same handling for a
+    duplicate-name 400/409 coming back from the server.
+
+    Non-transient failures (auth, permission, genuine validation errors that
+    aren't a name collision) raise immediately.
+    """
+    payload = {"name": name}
+    if parent_id is not None:
+        payload["parent"] = parent_id
+    label = f"create folder {name!r}"
+    timeout = _long_timeout(client, FOLDER_OP_TIMEOUT)
+    last_exc = None
+
+    def _safe_relookup():
+        """Re-resolve by name; a failed lookup is 'unknown', not fatal.
+
+        Letting the lookup abort the run would reintroduce the bug we're
+        fixing. Worst case we POST again and either succeed or get the
+        duplicate-name response, which routes right back here — a stray
+        duplicate folder is recoverable, an aborted 8-hour run is not.
+        """
+        try:
+            return relookup()
+        except (_requests.ConnectionError, _requests.HTTPError, OSError) as exc:
+            print(f"  {label}: re-lookup failed ({exc}) — assuming not created",
+                  file=sys.stderr)
+            return None
+
+    for attempt in range(FOLDER_OP_RETRIES):
+        if attempt:
+            adopted = _safe_relookup()
+            if adopted is not None:
+                print(f"  {label}: adopting existing id={adopted} "
+                      f"(a previous attempt landed server-side)", file=sys.stderr)
+                return adopted
+        try:
+            created = client.post("folders/", payload, timeout=timeout)
+            return int(created["id"])
+        except _requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", 0)
+            if status in FOLDER_CONFLICT_STATUSES:
+                adopted = _safe_relookup()
+                if adopted is not None:
+                    return adopted
+                raise  # a real validation error, not a name collision
+            if status not in FOLDER_OP_RETRY_STATUSES:
+                raise
+            last_exc = exc
+        except (_requests.ConnectionError, OSError) as exc:
+            last_exc = exc
+        if attempt < FOLDER_OP_RETRIES - 1:
+            delay = FOLDER_OP_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.25)
+            print(
+                f"  {label} failed ({last_exc}) — retrying in {delay:.1f}s "
+                f"[{attempt + 2}/{FOLDER_OP_RETRIES}]",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+    # Budget exhausted. One last lookup in case the final attempt committed.
+    adopted = _safe_relookup()
+    if adopted is not None:
+        return adopted
+    raise last_exc
+
+
+def _resolve_or_create_folders(client, rel_dirs, root_folder_id,
+                               known=None, on_resolved=None):
     """Map each relative dir (POSIX-style) to a PCXA folder id.
 
     Walks the folder tree segment by segment, reusing existing folders by
     name and creating any that don't exist. Serial intentionally: parent
     must exist before children, and parallel POSTs on the same name race
     into duplicate folders.
+
+    ``known`` pre-seeds the map from a manifest so a re-run doesn't re-walk
+    directories a previous run already resolved. ``on_resolved(rel_dir, id)``
+    fires for each dir resolved this run, so the caller can checkpoint
+    progress and still have something resumable if a later dir blows up.
+
+    Every call here goes through a retry with backoff — the whole reason
+    this function is worth its own error handling is that it runs *before*
+    any upload, so anything it raises wastes the entire run's setup.
     """
     cache = {"": root_folder_id}
+    for rel_dir, folder_id in (known or {}).items():
+        if rel_dir:
+            cache[rel_dir] = folder_id
     children_cache = {}
 
-    def _children_of(parent_id):
-        if parent_id in children_cache:
+    def _children_of(parent_id, refresh=False):
+        if not refresh and parent_id in children_cache:
             return children_cache[parent_id]
         m = {}
         if parent_id is None:
@@ -340,21 +529,29 @@ def _resolve_or_create_folders(client, rel_dirs, root_folder_id):
             # Fall back to the flat `folders/` listing in that case (same
             # pattern `cmd_folders_tree` uses).
             try:
-                tree = client.get("folders/folder_tree/")
+                tree = _folder_call_with_retry(
+                    lambda: client.get("folders/folder_tree/"),
+                    "folders/folder_tree/",
+                )
                 roots = tree if isinstance(tree, list) else tree.get("results", [])
             except _requests.HTTPError:
-                all_folders = client.get_all_pages("folders/")
+                all_folders = _folder_call_with_retry(
+                    lambda: client.get_all_pages("folders/"), "folders/",
+                )
                 roots = [f for f in all_folders if f.get("parent") is None]
             for node in roots:
                 m[node["name"].lower()] = node["id"]
         else:
             page = 1
             while True:
-                resp = client._request(
-                    "GET",
-                    client._url(f"folders/{parent_id}/subfolders/"),
-                    params={"page": page, "page_size": 1000},
-                    timeout=180,
+                resp = _folder_call_with_retry(
+                    lambda p=page: client._request(
+                        "GET",
+                        client._url(f"folders/{parent_id}/subfolders/"),
+                        params={"page": p, "page_size": 1000},
+                        timeout=_long_timeout(client, FOLDER_OP_TIMEOUT),
+                    ),
+                    f"folders/{parent_id}/subfolders/ page {page}",
                 )
                 data = resp.json()
                 results = data.get("results") if isinstance(data, dict) else data
@@ -378,18 +575,19 @@ def _resolve_or_create_folders(client, rel_dirs, root_folder_id):
             if key in cache:
                 parent_id = cache[key]
                 continue
-            siblings = _children_of(parent_id)
-            existing = siblings.get(seg.lower())
+            parent = parent_id
+            existing = _children_of(parent).get(seg.lower())
             if existing is not None:
                 parent_id = existing
             else:
-                payload = {"name": seg}
-                if parent_id is not None:
-                    payload["parent"] = parent_id
-                created = client.post("folders/", payload)
-                parent_id = int(created["id"])
-                siblings[seg.lower()] = parent_id
+                def _relookup(_parent=parent, _seg=seg):
+                    return _children_of(_parent, refresh=True).get(_seg.lower())
+
+                parent_id = _create_folder_with_retry(client, seg, parent, _relookup)
+                children_cache.setdefault(parent, {})[seg.lower()] = parent_id
             cache[key] = parent_id
+            if on_resolved is not None:
+                on_resolved(key, parent_id)
     return cache
 
 
@@ -411,7 +609,7 @@ def _fetch_one_folder_names(client, fid):
                 "page": page,
                 "page_size": EXISTING_FILES_PAGE_SIZE,
             },
-            timeout=EXISTING_FILES_TIMEOUT,
+            timeout=_long_timeout(client, EXISTING_FILES_TIMEOUT),
         )
         data = resp.json()
         results = data.get("results", []) if isinstance(data, dict) else data

@@ -16,6 +16,16 @@ Connection pooling:
         PCXA_HTTP_POOL_OFF    set to "1" to disable pooling (fall back to
                               fresh-conn-per-request — emergency switch)
         PCXA_HTTP_DEBUG       set to "1" to print pool stats at exit
+        PCXA_HTTP_TIMEOUT     default read timeout in seconds (default 30)
+
+Timeouts:
+    Any request that doesn't pass an explicit ``timeout`` gets
+    ``get_default_timeout()``. That default is 30s, overridable per-shell
+    with ``PCXA_HTTP_TIMEOUT`` or per-run with ``pcxa --timeout <seconds>``
+    (which calls ``set_default_timeout()`` before the client is built).
+    Keeping the fallback here — rather than hard-coding 30 at each call
+    site — is what makes one knob cover every path, including the ones
+    that never grew a timeout argument of their own.
 """
 
 import atexit
@@ -41,6 +51,52 @@ class HTTPError(Exception):
 
 class ConnectionError(Exception):
     """Raised when a network connection cannot be established."""
+
+
+# --------------------------------------------------------------------------
+# Default timeout
+# --------------------------------------------------------------------------
+
+# Fallback read timeout for requests that don't pass one. 30s is fine for
+# ordinary reads but too tight for write endpoints on large projects —
+# `POST folders/` alone measured ~9s on project 4, and a single call
+# crossing the ceiling used to abort a whole `files sync` run
+# (PCX-Analytics/pcxa#1689, #1454).
+FALLBACK_TIMEOUT = 30.0
+
+TIMEOUT_ENV_VAR = "PCXA_HTTP_TIMEOUT"
+
+
+def _coerce_timeout(value):
+    """Return ``value`` as a positive float, or None if it isn't usable."""
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+_DEFAULT_TIMEOUT = _coerce_timeout(os.environ.get(TIMEOUT_ENV_VAR)) or FALLBACK_TIMEOUT
+
+
+def get_default_timeout():
+    """Read timeout applied to requests that don't pass one explicitly."""
+    return _DEFAULT_TIMEOUT
+
+
+def set_default_timeout(seconds):
+    """Set the process-wide default read timeout. Returns the value applied.
+
+    Ignores non-positive / unparseable input so a bad ``--timeout 0`` can't
+    silently turn every request into an unbounded block.
+    """
+    global _DEFAULT_TIMEOUT
+    coerced = _coerce_timeout(seconds)
+    if coerced is not None:
+        _DEFAULT_TIMEOUT = coerced
+    return _DEFAULT_TIMEOUT
 
 
 # --------------------------------------------------------------------------
@@ -390,6 +446,8 @@ def _do_request(conn, was_reused, method, request_target, body, request_headers,
 
 def _request_stdlib(method, url, *, headers=None, params=None, json=None, data=None,
                     files=None, timeout=None, stream=False):
+    if timeout is None:
+        timeout = get_default_timeout()
     parsed = urlparse(url)
     if params:
         query = urlencode(params, doseq=True)
@@ -528,4 +586,8 @@ __all__ = [
     "Session",
     "RequestsCompat",
     "requests",
+    "FALLBACK_TIMEOUT",
+    "TIMEOUT_ENV_VAR",
+    "get_default_timeout",
+    "set_default_timeout",
 ]
