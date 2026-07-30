@@ -1,9 +1,13 @@
 """Tests for `files query` — boolean file search (AND/OR/NOT, grouping,
 field scoping, phrases) over ``semantic-search/boolean-search/``.
 
-This is the precise channel: exhaustive with an exact count, unlike the
-ranked 50-capped ``files search``, and structurally expressive, unlike
+This is the precise channel: unranked and countable, unlike the ranked
+50-capped ``files search``, and structurally expressive, unlike
 ``files list --search/--content``.
+
+Not called "exhaustive" on purpose: multi-term content ``AND`` is currently
+chunk-scoped and under-reports (~70% missed on a measured project), so the
+skill documents the count as a floor. See ``cmd_files_query``'s docstring.
 
 The parse explain-back and the exactness of the count are asserted
 deliberately — a result set whose interpretation you cannot verify is not one

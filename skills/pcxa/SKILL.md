@@ -95,7 +95,7 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 ```bash
 pcxa files list --ext PDF --search "keyword" --limit 50  # title trigram (fuzzy by default; exact first)
 pcxa files list --search "concret" --exact               # tighter title match (still AND-matches words, NOT a phrase)
-pcxa files query 'title:schedule AND precast AND delay'  # BOOLEAN: AND/OR/NOT + grouping, exhaustive + exact count
+pcxa files query 'title:schedule AND precast AND delay'  # BOOLEAN: AND/OR/NOT + grouping (⚠ multi-term AND under-reports today — see below)
 pcxa files query 'title:report AND (delay OR "change order")'   # grouping + quoted phrase
 pcxa files query 'contract NOT draft' --ext PDF          # exclusion (impossible with --search/--content)
 pcxa files query 'title:"Case Memo"' --count-only        # true LITERAL phrase on the filename
@@ -160,7 +160,15 @@ Search results include `url` fields — always show these to users for document 
 - **`files list --content <term>`** — matches the indexed **body/contents** as a **literal substring** (not ranked, not semantic). Paginated + **countable and exhaustive**: `--content <term> --count-only` gives the *exact* total and you can page through *every* match in a stable order (by `id`). `count: 0` means the term is genuinely in no in-scope file — so this is the path for a "not located" / completeness finding. Use it to find files by what's inside them — e.g. an eDiscovery estate where emails are named by bare Bates numbers (`YATES002119058`) and the term only appears in the body. Only indexed files match; scope with `--folder`/`--ext`/`--index-status`.
 - **`files search <term>` / `files content <term>`** — hybrid semantic + keyword **ranking** (relevance-ordered), a **top-50 reranked sample, not a total**. Best for natural-language / "most relevant" lookups. Do **not** use it to count or enumerate — it can't page past 50, and asking for more (`--limit 200`) is clamped to 50 with a notice pointing you at `--content`. For "how many / list them all", use `--content`.
 
-- **`files query '<expr>'`** — **boolean** search: `AND` / `OR` / `NOT`, parentheses for grouping, `title:` / `content:` field scoping, and `"quoted phrases"` matched adjacently. Exhaustive with an **exact count**, like `--content`, but structurally expressive. Use it whenever the question has more than one condition — *"schedule in the title AND both precast and delay in the body"* is one call: `pcxa files query 'title:schedule AND precast AND delay'`. Bare terms search content; operators must be UPPERCASE (lowercase `and`/`or` are ordinary words). Every response echoes `parsed` — **read it** to confirm the query was understood before trusting the results.
+- **`files query '<expr>'`** — **boolean** search: `AND` / `OR` / `NOT`, parentheses for grouping, `title:` / `content:` field scoping, and `"quoted phrases"` matched adjacently. Structurally expressive where `--content` is a single literal. Use it whenever the question has more than one condition — *"schedule in the title AND both precast and delay in the body"* is one call: `pcxa files query 'title:schedule AND precast AND delay'`. Bare terms search content; operators must be UPPERCASE (lowercase `and`/`or` are ordinary words). Every response echoes `parsed` — **read it** to confirm the query was understood before trusting the results.
+
+  > ⚠️ **Two or more CONTENT terms joined by `AND` are currently chunk-scoped, and they UNDER-REPORT.** The match requires the terms to fall in the *same passage* (~3,000 characters) of a file, not merely in the same file — so `precast AND delay` misses files where the two words appear pages apart. Measured on a real project: **1,042 files returned where 3,496 contain both** (~70% missed).
+  >
+  > **Do not present a multi-term `AND` result as complete, and never use it for a "not located" / completeness finding.** Treat the count as a **floor**, exactly as you would `count_exact: false`. Two safe alternatives while this stands:
+  > - Run each content term as its own `files query` (or `files list --content <term>`, which IS exhaustive per term) and intersect the `file_id`s yourself. Slower, but correct.
+  > - Keep `AND` when you genuinely want the stricter "these words near each other" reading — that is a legitimate search, just say so rather than calling it exhaustive.
+  >
+  > A single content term, `title:` predicates, `OR`, and `NOT` are unaffected. A fix making `AND` file-scoped is rolling out behind a server flag; when it lands, counts on existing `AND` queries **go up** — that is the correction, not a regression. Re-read this section after the rollout is announced.
 
 `--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc. For anything beyond a plain AND of one title term and one body term, reach for `files query` instead.
 
