@@ -194,6 +194,48 @@ export PCXA_HTTP_TIMEOUT=300
 adopts an existing folder when a timed-out create turns out to have landed
 server-side — so one slow call no longer aborts a multi-hour run.
 
+### Loading a corpus with your own chunks and embeddings
+
+If you run your own extraction/chunking/embedding pipeline, PCXA can serve your
+index instead of deriving its own. Files go up first, then chunks attach to them:
+
+```bash
+pcxa files sync ./corpus --folder 42 --manifest .pcxa-sync.json   # 1. the files
+pcxa files set-index-mode 101 102 103 --mode none                 # 2. don't re-chunk them
+pcxa files upload-chunks ./chunks/ --manifest .pcxa-sync.json \
+                                   --state .pcxa-chunks.json      # 3. your chunks + vectors
+```
+
+Input is JSON-Lines, one record per file, streamed — corpus-sized inputs are
+fine:
+
+```json
+{"file_id": 123, "chunks": [{"chunk_index": 0, "content": "...", "embedding": [768 floats]}]}
+```
+
+`--manifest` lets records use `"path"` or `"name"` instead of `"file_id"`,
+resolved against what `files sync` recorded. `--state` makes re-runs resume.
+**`--dry-run` validates the whole corpus without sending anything** — run it
+first; it catches wrong embedding dimensions and partially-embedded files, both
+of which are expensive to discover later.
+
+Three things worth knowing before a large load:
+
+- **Embeddings must be 768-dim and all-or-nothing per file.** A file with vectors
+  on only some chunks is rejected, because the server would silently re-embed the
+  whole file at your cost.
+- **`--chunks-per-hour` defaults to 60,000, which is not the API rate limit.** It
+  matches the single-writer rate at which vectors are mirrored into the durable
+  store; the endpoint itself accepts ~150× faster, and past a backlog ceiling the
+  durable copy is shed and needs an operator to rebuild. Override with `0` only if
+  someone has agreed to run that reconcile.
+- **You need project-admin or company-admin** on the target project. Chunk upload
+  replaces a file's entire indexed content, so it takes the same gate as other
+  bulk file operations.
+
+Full details, including what the server guarantees afterwards, are in
+`skills/pcxa/SKILL.md` under "Bring your own chunks".
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).

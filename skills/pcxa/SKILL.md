@@ -126,9 +126,122 @@ pcxa files sync /path/to/tree --folder 5 --include "*.pdf" --exclude "draft_*" -
 pcxa files delete 123 124 --yes                          # mark for deletion (adds 'to_delete' tag)
 pcxa files restore 123 124                               # remove 'to_delete' tag (undo)
 pcxa files list --tags to_delete                         # list everything pending deletion
+pcxa files set-index-mode 1 2 3 --mode none              # stop server-side indexing (BYOC prep)
+pcxa files upload-chunks corpus.jsonl --manifest .pcxa-sync.json   # supply your own chunks + vectors
 ```
 
 **Upload storage:** Small files are uploaded through the API. Larger files use a presigned upload flow handled by the CLI and API.
+
+## Bring your own chunks (`files upload-chunks`)
+
+For a caller that runs its **own** extraction / chunking / embedding pipeline and
+wants PCXA to serve *its* index instead of re-deriving one. Files must exist
+first — chunks attach to them.
+
+```bash
+# 1. upload the files (idempotent, resumable, records file_ids in the manifest)
+pcxa files sync ./corpus --folder 42 --manifest .pcxa-sync.json
+
+# 2. stop our chunker touching them (optional but recommended — see below)
+pcxa files set-index-mode 101 102 103 --mode none
+
+# 3. supply chunks + embeddings
+pcxa files upload-chunks ./chunks/ --manifest .pcxa-sync.json --state .pcxa-chunks.json
+
+# validate the whole corpus without sending anything
+pcxa files upload-chunks ./chunks/ --dry-run
+```
+
+**Input is JSON-Lines, one record per file, streamed** — a multi-million-chunk
+corpus never has to fit in memory. Pass `.jsonl` files or directories of them.
+
+```json
+{"file_id": 123, "chunks": [
+  {"chunk_index": 0, "content": "...", "embedding": [768 floats]},
+  {"chunk_index": 1, "content": "...", "embedding": [768 floats]}
+]}
+```
+
+Per-chunk optional keys: `content_hash` (sha256 hex), `page_number` (1-based),
+`metadata` (object). Per-file optional keys: `file_version_id`,
+`indexed_content_hash`, `document_summary`, `document_context_strategy`.
+
+Instead of `file_id` a record may carry `path` or `name`, resolved through
+`--manifest` against the manifest a prior `files sync` wrote — so the two
+commands compose without you keeping your own id table. A filename that maps to
+more than one file is **rejected, not guessed** (it would overwrite the wrong
+document's index); address those by `path` or `file_id`.
+
+### Embeddings
+
+Supply `embedding` on every chunk of a file and that file is marked **INDEXED** —
+our embedder never runs on it, and you pay nothing for embedding. Omit them
+entirely and the file lands **CHUNKED** for our embedder to pick up (billable,
+but valid — useful if you have good chunk boundaries but no vectors).
+
+**Embeddings are all-or-nothing per file.** A file where only some chunks carry a
+vector is rejected client-side, because the server would demote the whole file to
+CHUNKED and re-embed it — silently costing you the thing you were avoiding.
+
+Vectors must be exactly **768 dimensions** from `gemini-embedding-001`
+(`--embedding-model` to override, but the server requires an exact match). This
+is checked hard on purpose: every vector in the index is 768-dim, so another
+768-dim model's output validates fine and then simply retrieves badly, forever,
+with nothing to detect it afterwards.
+
+You do **not** need to supply identifier metadata — the server extracts
+RFI/PCO/CO/NCR-style references from the `content` you send.
+
+### ⚠️ Pacing: the default is deliberate, and it is not the rate limit
+
+Every vector is mirrored from Pinecone (the rebuildable serving index) into
+R2/Lance (the **system of record**) through an outbox drained by a *single*
+writer at ~60,000 chunks/hour. The endpoint accepts roughly **150× faster than
+that.** Past the outbox's depth ceiling the mirror **sheds**: your vectors serve
+fine, but the durable copy is dropped and only an operator running
+`reconcile_vector_lake --apply` can rebuild it.
+
+So `--chunks-per-hour` defaults to **60,000** — matching the drain, not the API
+throttle. `--chunks-per-hour 0` uploads as fast as the server allows; only do
+that if someone has agreed to run the reconcile afterwards.
+
+### Why `set-index-mode --mode none` first
+
+Without it, our own chunker processes every file before your chunks arrive. That
+is *harmless* — your upload replaces whatever it produced, and the guards below
+then protect it — but it is pure waste at corpus scale, and XLSX in particular is
+a known CPU hog on the ingest workers. `--mode none` skips it entirely; your
+upload still creates the index row.
+
+### After a successful upload, the server leaves your chunks alone
+
+- The chunker skips the file on any redrive (reconcile retries, stray redispatch).
+- A staff re-run refuses unless explicitly forced.
+- Index-policy changes — including a project left at the default `selective` —
+  neither delete your chunks nor strip their vectors.
+- Uploading a **new version** of the file keeps your chunks and marks the index
+  **stale**: search keeps returning the *older* text until you re-upload for the
+  new version.
+
+### Operational notes
+
+- **Auth: project admin or company admin.** Chunk upload replaces a file's whole
+  indexed content, so it takes the same gate as every other bulk file operation.
+  Plain project membership gets `403`. Give an integration a service account with
+  project-admin on each target project.
+- **Resume:** `--state <path>` records applied file ids; a re-run skips them.
+  Ctrl-C saves state before exiting.
+- **Batching** is automatic against the server caps — 50 files and 5,000 chunks
+  per request, 2,000 chunks per file, 16,000 chars per chunk. Values above the
+  caps are clamped rather than rejected.
+- **`--dry-run` validates everything** — dimensions, partial embeddings,
+  duplicate `chunk_index`, oversized content — without spending a request. Run it
+  over the full corpus before the real load.
+- **Failures are per-item.** One bad `file_id` doesn't abort the batch; bad
+  records are counted and logged (`--error-log` for one JSON line each).
+  `--max-failures` (default 100) aborts a run that is clearly misconfigured.
+- **Rate limits** (`429`) are retried honouring `Retry-After`.
+- **Exit code is non-zero** if anything failed, so a driving script can tell.
 
 **Bulk tree sync (`files sync`):** Mirrors a local directory tree under a PCXA folder. Walks the tree, creates any missing subfolders to match, and uploads files in parallel via the same presign+PUT/multipart path as `files upload`. Idempotent two ways: it lists each target folder once and skips local files whose name already exists there, and an optional `--manifest <path>` persists `{relative_path → {size, file_id}}` so re-runs skip without hitting the API. Failures (network, register errors) are listed at the end and counted toward `error` rate. Progress is rendered live on stderr: a bar plus files-done, bytes-done/total, throughput, current concurrency (`c=N`), elapsed, ETA, and error count. Filters: `--include` and `--exclude` accept repeatable globs against filenames; dotfiles/dot-dirs are skipped by default (`--include-hidden` opts in).
 
