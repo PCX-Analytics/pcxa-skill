@@ -570,8 +570,35 @@ def cmd_files_set_index_mode(client, args):
     and XLSX in particular is a known CPU hog on the ingest workers.
     """
     as_json = getattr(args, "format", "table") == "json"
+
+    raw_tokens = list(args.file_ids or [])
+
+    # --ids-file / stdin, mirroring `files purge` — a corpus's worth of ids does
+    # not fit in argv.
+    ids_file = getattr(args, "ids_file", None)
+    if ids_file:
+        try:
+            text = sys.stdin.read() if ids_file == "-" else Path(ids_file).expanduser().read_text()
+        except OSError as exc:
+            print(f"error: --ids-file unreadable: {exc}", file=sys.stderr)
+            return 1
+        raw_tokens.extend(text.replace(",", " ").split())
+
+    # --from-manifest: the corpus you just uploaded, without a jq incantation.
+    from_manifest = getattr(args, "from_manifest", None)
+    if from_manifest:
+        try:
+            by_path, _ = _load_manifest_index(from_manifest)
+        except ChunkInputError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if not by_path:
+            print(f"error: no file ids in manifest {from_manifest}", file=sys.stderr)
+            return 1
+        raw_tokens.extend(str(v) for v in by_path.values())
+
     file_ids = []
-    for raw in args.file_ids:
+    for raw in raw_tokens:
         for part in str(raw).split(","):
             part = part.strip()
             if part:
@@ -580,8 +607,14 @@ def cmd_files_set_index_mode(client, args):
                 except ValueError:
                     print(f"error: not an integer file id: {part!r}", file=sys.stderr)
                     return 1
+    # Dedupe, preserving order (mirrors `files purge`).
+    seen = set()
+    file_ids = [i for i in file_ids if not (i in seen or seen.add(i))]
     if not file_ids:
-        print("error: no file ids given", file=sys.stderr)
+        print(
+            "error: no file ids given — use positional args, --ids-file, or --from-manifest",
+            file=sys.stderr,
+        )
         return 1
 
     # Server cap is 10k ids per call; chunk so a corpus-sized list just works.

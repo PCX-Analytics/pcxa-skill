@@ -354,9 +354,16 @@ def test_pacer_disabled_never_sleeps(monkeypatch):
 # ── set-index-mode ───────────────────────────────────────────────────────────
 
 
+def _mode_args(**over):
+    base = dict(file_ids=[], ids_file=None, from_manifest=None, mode="none",
+                index_text_source=None, format="json")
+    base.update(over)
+    return Namespace(**base)
+
+
 def test_set_index_mode_none(client, capsys):
     client.session = RecordingSession(responses=[FakeResponse(200, {"updated": 3, "skipped": []})])
-    args = Namespace(file_ids=["1", "2,3"], mode="none", index_text_source=None, format="json")
+    args = _mode_args(file_ids=["1", "2,3"])
 
     rc = C.cmd_files_set_index_mode(client, args)
 
@@ -367,8 +374,7 @@ def test_set_index_mode_none(client, capsys):
 
 
 def test_set_index_mode_rejects_non_integer_ids(client, capsys):
-    args = Namespace(file_ids=["abc"], mode="none", index_text_source=None, format="json")
-    assert C.cmd_files_set_index_mode(client, args) == 1
+    assert C.cmd_files_set_index_mode(client, _mode_args(file_ids=["abc"])) == 1
     assert client.session.calls == []
     assert "not an integer" in capsys.readouterr().err
 
@@ -379,9 +385,48 @@ def test_set_index_mode_chunks_beyond_the_server_cap(client):
         FakeResponse(200, {"updated": 10_000, "skipped": []}),
         FakeResponse(200, {"updated": 1, "skipped": []}),
     ])
-    args = Namespace(file_ids=ids, mode="none", index_text_source=None, format="json")
 
-    C.cmd_files_set_index_mode(client, args)
+    C.cmd_files_set_index_mode(client, _mode_args(file_ids=ids))
 
     posts = [c for c in client.session.calls if c["method"] == "POST"]
     assert [len(p["json"]["file_ids"]) for p in posts] == [10_000, 1]
+
+
+def test_set_index_mode_reads_ids_file(client, tmp_path):
+    """A corpus's worth of ids does not fit in argv."""
+    f = tmp_path / "ids.txt"
+    f.write_text("1 2,3\n4\n")
+    client.session = RecordingSession(responses=[FakeResponse(200, {"updated": 4, "skipped": []})])
+
+    C.cmd_files_set_index_mode(client, _mode_args(ids_file=str(f)))
+
+    assert client.session.calls[0]["json"]["file_ids"] == [1, 2, 3, 4]
+
+
+def test_set_index_mode_from_sync_manifest(client, tmp_path):
+    """'The corpus I just uploaded' without a jq incantation."""
+    m = tmp_path / "m.json"
+    m.write_text(json.dumps({"version": 1, "files": {
+        "a.pdf": {"file_id": 11, "name": "a.pdf"},
+        "b.pdf": {"file_id": 12, "name": "b.pdf"},
+        "skipped.pdf": {"skipped_reason": "already_in_target_folder"},   # no id
+    }}))
+    client.session = RecordingSession(responses=[FakeResponse(200, {"updated": 2, "skipped": []})])
+
+    C.cmd_files_set_index_mode(client, _mode_args(from_manifest=str(m)))
+
+    assert sorted(client.session.calls[0]["json"]["file_ids"]) == [11, 12]
+
+
+def test_set_index_mode_dedupes_ids(client):
+    client.session = RecordingSession(responses=[FakeResponse(200, {"updated": 2, "skipped": []})])
+
+    C.cmd_files_set_index_mode(client, _mode_args(file_ids=["7", "7", "8"]))
+
+    assert client.session.calls[0]["json"]["file_ids"] == [7, 8]
+
+
+def test_set_index_mode_with_no_ids_at_all_errors(client, capsys):
+    assert C.cmd_files_set_index_mode(client, _mode_args()) == 1
+    assert client.session.calls == []
+    assert "--from-manifest" in capsys.readouterr().err

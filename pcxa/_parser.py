@@ -408,8 +408,15 @@ def build_parser():
         help="Bulk-set index_mode. Use 'none' before a BYOC load so the server "
              "doesn't chunk files whose chunks you're about to supply.",
     )
-    p.add_argument("file_ids", nargs="+",
-                   help="File ids (space- and/or comma-separated).")
+    p.add_argument("file_ids", nargs="*",
+                   help="File ids (space- and/or comma-separated). May also be supplied "
+                        "via --ids-file or --from-manifest.")
+    p.add_argument("--ids-file", dest="ids_file",
+                   help="Read ids from a file (whitespace/comma-separated). '-' for stdin. "
+                        "Use this for a corpus — a million ids will not fit in argv.")
+    p.add_argument("--from-manifest", dest="from_manifest",
+                   help="Read every file id out of a `files sync` manifest. The direct way "
+                        "to say 'the corpus I just uploaded'.")
     p.add_argument("--mode", required=True,
                    choices=["auto", "always", "none", "external"],
                    help="auto = policy decides; always = force; none = never index (the "
