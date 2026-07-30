@@ -9,6 +9,15 @@ import argparse
 
 from pcxa import __version__
 from pcxa.commands.activities import MAX_TAG_FILTER_TAGS, TAG_FILTER_MODES
+from pcxa.commands.chunks import (
+    DEFAULT_EMBEDDING_MODEL as CHUNK_DEFAULT_EMBEDDING_MODEL,
+)
+from pcxa.commands.chunks import (
+    EMBEDDING_DIMENSIONS as CHUNK_EMBEDDING_DIMENSIONS,
+)
+from pcxa.commands.chunks import (
+    LAKE_DRAIN_CHUNKS_PER_HOUR as CHUNK_LAKE_DRAIN_PER_HOUR,
+)
 from pcxa.commands.tags_folders import DELETION_TAG
 
 
@@ -343,6 +352,78 @@ def build_parser():
                         "seconds: throughput, in-flight, errors, http "
                         "reuse rate, retries. Default 0 = off. 30 is a "
                         "reasonable starting point for long runs.")
+
+    p = files_sub.add_parser(
+        "upload-chunks",
+        help="Upload pre-computed chunks + embeddings for existing files "
+             "(bring-your-own-chunks; stops server-side chunking)",
+    )
+    p.add_argument("paths", nargs="+",
+                   help="JSON-Lines file(s) or directory/ies of *.jsonl. One record "
+                        "per file: {\"file_id\": N, \"chunks\": [...]}. Streamed, so "
+                        "corpus-sized inputs are fine.")
+    p.add_argument("--embedding-model", dest="embedding_model",
+                   default=CHUNK_DEFAULT_EMBEDDING_MODEL,
+                   help=f"Model that produced the embeddings (default: "
+                        f"{CHUNK_DEFAULT_EMBEDDING_MODEL}). The server requires an exact "
+                        f"match: every vector in the index is "
+                        f"{CHUNK_EMBEDDING_DIMENSIONS}-dim, so another "
+                        f"{CHUNK_EMBEDDING_DIMENSIONS}-dim model's output validates fine "
+                        f"and then retrieves badly, silently.")
+    p.add_argument("--manifest",
+                   help="Manifest from a prior `files sync`. Lets records address files "
+                        "by \"path\" or \"name\" instead of \"file_id\".")
+    p.add_argument("--state",
+                   help="JSON resume state. Applied file ids are recorded, so a re-run "
+                        "after an interruption skips them.")
+    p.add_argument("--chunks-per-hour", dest="chunks_per_hour", type=int,
+                   default=CHUNK_LAKE_DRAIN_PER_HOUR,
+                   help=f"Throughput governor (default: {CHUNK_LAKE_DRAIN_PER_HOUR:,}). "
+                        f"Matches the single-writer vector-lake drain rate, NOT the API "
+                        f"rate limit — the endpoint accepts ~150x faster than the durable "
+                        f"copy is written, and past the outbox ceiling the mirror sheds "
+                        f"(vectors still serve; the durable copy is dropped). 0 disables; "
+                        f"only do that if an operator will run `reconcile_vector_lake "
+                        f"--apply` afterwards.")
+    p.add_argument("--files-per-request", dest="files_per_request", type=int, default=50,
+                   help="Files per request (default/server max: 50).")
+    p.add_argument("--chunks-per-request", dest="chunks_per_request", type=int, default=5000,
+                   help="Chunks per request (default/server max: 5000).")
+    p.add_argument("--limit", type=int, default=0,
+                   help="Stop after queueing N files. Useful for graduated smoke tests. "
+                        "0 = no limit (default).")
+    p.add_argument("--max-failures", dest="max_failures", type=int, default=100,
+                   help="Abort once cumulative failures reach this (default: 100; 0 "
+                        "disables).")
+    p.add_argument("--error-log", dest="error_log",
+                   help="Append one JSON line per failure here, for live diagnosis.")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="Validate and report batching without sending anything. Catches "
+                        "dimension mismatches and partial-embedding files before they "
+                        "cost a request.")
+    _add_http_timeout(p)
+
+    p = files_sub.add_parser(
+        "set-index-mode",
+        help="Bulk-set index_mode. Use 'none' before a BYOC load so the server "
+             "doesn't chunk files whose chunks you're about to supply.",
+    )
+    p.add_argument("file_ids", nargs="*",
+                   help="File ids (space- and/or comma-separated). May also be supplied "
+                        "via --ids-file or --from-manifest.")
+    p.add_argument("--ids-file", dest="ids_file",
+                   help="Read ids from a file (whitespace/comma-separated). '-' for stdin. "
+                        "Use this for a corpus — a million ids will not fit in argv.")
+    p.add_argument("--from-manifest", dest="from_manifest",
+                   help="Read every file id out of a `files sync` manifest. The direct way "
+                        "to say 'the corpus I just uploaded'.")
+    p.add_argument("--mode", required=True,
+                   choices=["auto", "always", "none", "external"],
+                   help="auto = policy decides; always = force; none = never index (the "
+                        "BYOC prep value); external = index a paired .txt sidecar.")
+    p.add_argument("--index-text-source", dest="index_text_source", type=int, default=None,
+                   help="Sidecar file id. Required for --mode external, rejected "
+                        "otherwise.")
 
     p = files_sub.add_parser("upload-version",
                              help="Upload a new version of an existing PCXA file")

@@ -1,7 +1,7 @@
 {
   "name": "pcxa",
   "description": "PCXA construction intelligence tools for Claude Code: project files, activities, forms, resources, timesheets, links, and AI chat.",
-  "version": "0.6.12",
+  "version": "0.7.0",
   "author": {
     "name": "PCX Analytics"
   },

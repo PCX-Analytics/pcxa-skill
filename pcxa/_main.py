@@ -44,6 +44,7 @@ from pcxa.commands.files import (
     cmd_files_upload,
     cmd_files_upload_version,
 )
+from pcxa.commands.chunks import cmd_files_set_index_mode, cmd_files_upload_chunks
 from pcxa.commands.sync import cmd_files_sync
 from pcxa.commands.tags_folders import (
     cmd_categorize,
@@ -207,6 +208,8 @@ SUB_HANDLERS = {
         "aggregate": cmd_files_aggregate, "recent": cmd_files_recent, "download": cmd_files_download,
         "upload": cmd_files_upload, "upload-version": cmd_files_upload_version,
         "sync": cmd_files_sync,
+        "upload-chunks": cmd_files_upload_chunks,
+        "set-index-mode": cmd_files_set_index_mode,
         "update": cmd_file_update,
         "delete": cmd_files_delete, "restore": cmd_files_restore, "purge": cmd_files_purge,
         "bulk-patch": cmd_files_bulk_patch,
@@ -374,8 +377,13 @@ def main():
     resolve_ids(client)
 
     try:
+        # A handler may return an int exit code; anything else (the common case —
+        # commands that just print) leaves the exit status at 0. Needed because a
+        # long-running bulk command that partially fails must not report success
+        # to the shell script driving it.
+        rc = None
         if args.command in HANDLERS:
-            HANDLERS[args.command](client, args)
+            rc = HANDLERS[args.command](client, args)
         elif args.command in SUB_HANDLERS:
             sub_key = SUB_COMMAND_KEYS[args.command]
             sub_cmd = getattr(args, sub_key, None)
@@ -383,9 +391,11 @@ def main():
                 avail = ", ".join(SUB_HANDLERS[args.command].keys())
                 print(f"Usage: pcxa {args.command} {{{avail}}}", file=sys.stderr)
                 sys.exit(1)
-            SUB_HANDLERS[args.command][sub_cmd](client, args)
+            rc = SUB_HANDLERS[args.command][sub_cmd](client, args)
         else:
             parser.print_help()
+        if isinstance(rc, int) and not isinstance(rc, bool) and rc != 0:
+            sys.exit(rc)
     except requests.HTTPError as e:
         print(f"API error: {e}", file=sys.stderr)
         if e.response is not None:
