@@ -299,8 +299,17 @@ def cmd_files_query(client, args):
 
     Routes through ``semantic-search/boolean-search/``. This is the *precise*
     channel: unlike ``files search`` (a relevance-ranked, 50-capped sample) it
-    returns an exhaustive result set with an exact count, and unlike
+    returns an unranked result set in stable id order, and unlike
     ``files list --search/--content`` it can express real boolean structure.
+
+    **Completeness caveat — do not describe this as exhaustive today.** Two or
+    more CONTENT terms joined by ``AND`` are compiled against the per-chunk
+    text vector, so a match requires the terms to land in the *same passage*
+    (~3,000 chars) rather than merely the same file. Measured on a real
+    project: 1,042 files returned where 3,496 contain both terms (~70%
+    missed). A single content term, ``title:`` predicates, ``OR`` and ``NOT``
+    are unaffected. A server-side fix makes ``AND`` file-scoped; when it is
+    enabled, counts on existing ``AND`` queries go UP.
 
         pcxa files query 'title:schedule AND precast AND delay'
         pcxa files query 'title:report AND (delay OR "change order")'

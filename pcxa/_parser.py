@@ -158,7 +158,9 @@ def build_parser():
 
     p = files_sub.add_parser(
         "query",
-        help="BOOLEAN file search — AND/OR/NOT, grouping, field scoping, phrases (exhaustive + exact count)",
+        help="BOOLEAN file search — AND/OR/NOT, grouping, field scoping, phrases. "
+             "NOTE: two or more content terms joined by AND currently match only within the "
+             "same passage of a file, so the result UNDER-REPORTS — treat the count as a floor",
     )
     p.add_argument("query",
                    help='Boolean expression, e.g. \'title:report AND (delay OR "change order")\'. '
