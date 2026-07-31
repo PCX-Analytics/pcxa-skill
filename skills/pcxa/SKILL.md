@@ -95,7 +95,7 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 ```bash
 pcxa files list --ext PDF --search "keyword" --limit 50  # title trigram (fuzzy by default; exact first)
 pcxa files list --search "concret" --exact               # tighter title match (still AND-matches words, NOT a phrase)
-pcxa files query 'title:schedule AND precast AND delay'  # BOOLEAN: AND/OR/NOT + grouping (⚠ multi-term AND under-reports today — see below)
+pcxa files query 'title:schedule AND precast AND delay'  # BOOLEAN: AND/OR/NOT + grouping (⚠ multi-term AND under-reports on projects without the fix — see below)
 pcxa files query 'title:report AND (delay OR "change order")'   # grouping + quoted phrase
 pcxa files query 'contract NOT draft' --ext PDF          # exclusion (impossible with --search/--content)
 pcxa files query 'title:"Case Memo"' --count-only        # true LITERAL phrase on the filename
@@ -275,13 +275,21 @@ Search results include `url` fields — always show these to users for document 
 
 - **`files query '<expr>'`** — **boolean** search: `AND` / `OR` / `NOT`, parentheses for grouping, `title:` / `content:` field scoping, and `"quoted phrases"` matched adjacently. Structurally expressive where `--content` is a single literal. Use it whenever the question has more than one condition — *"schedule in the title AND both precast and delay in the body"* is one call: `pcxa files query 'title:schedule AND precast AND delay'`. Bare terms search content; operators must be UPPERCASE (lowercase `and`/`or` are ordinary words). Every response echoes `parsed` — **read it** to confirm the query was understood before trusting the results.
 
-  > ⚠️ **Two or more CONTENT terms joined by `AND` are currently chunk-scoped, and they UNDER-REPORT.** The match requires the terms to fall in the *same passage* (~3,000 characters) of a file, not merely in the same file — so `precast AND delay` misses files where the two words appear pages apart. Measured on a real project: **1,042 files returned where 3,496 contain both** (~70% missed).
+  > ⚠️ **Multi-term `AND` is being fixed PER PROJECT — and nothing in the response tells you which behaviour you got.**
   >
-  > **Do not present a multi-term `AND` result as complete, and never use it for a "not located" / completeness finding.** Treat the count as a **floor**, exactly as you would `count_exact: false`. Two safe alternatives while this stands:
-  > - Run each content term as its own `files query` (or `files list --content <term>`, which IS exhaustive per term) and intersect the `file_id`s yourself. Slower, but correct.
-  > - Keep `AND` when you genuinely want the stricter "these words near each other" reading — that is a legitimate search, just say so rather than calling it exhaustive.
+  > **Old behaviour, still live on most projects:** two or more CONTENT terms joined by `AND` are chunk-scoped and UNDER-REPORT. The match requires the terms to fall in the *same passage* (~3,000 characters), not merely in the same file, so `precast AND delay` misses files where the words appear pages apart. Measured: **1,042 returned where 3,496 match** (~70% missed); on another shape, **3,738 returned where 9,342 match** (~60% missed).
   >
-  > A single content term, `title:` predicates, `OR`, and `NOT` are unaffected. A fix making `AND` file-scoped is rolling out behind a server flag; when it lands, counts on existing `AND` queries **go up** — that is the correction, not a regression. Re-read this section after the rollout is announced.
+  > **New behaviour, rolling out:** `AND` is file-scoped, the count is correct, and totals are more often exact rather than capped.
+  >
+  > **The trap: `count_exact: true` appears in BOTH cases.** The old path returns a wrong number *and* labels it exact whenever it lands under the ceiling. So `count_exact` does not distinguish them, and neither does anything else in the payload.
+  >
+  > **So do not rest a completeness or "not located" finding on a multi-term `AND` unless you have confirmed the fix is live for that project.** Otherwise:
+  > - Run each content term as its own `files query` (or `files list --content <term>`, which IS exhaustive per term) and intersect the `file_id`s yourself. Slower, correct on every project.
+  > - Or ask which projects have the file-scoped fix enabled, and say so when you rely on it.
+  >
+  > Using `AND` for the stricter "these words near each other" reading stays legitimate — just describe it that way rather than calling it exhaustive.
+  >
+  > A single content term, `title:` predicates, `OR`, and `NOT` are unaffected. When the fix reaches a project, counts on existing `AND` queries **go up** — that is the correction, not a regression.
 
 `--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc. For anything beyond a plain AND of one title term and one body term, reach for `files query` instead.
 
