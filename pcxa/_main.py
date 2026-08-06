@@ -12,7 +12,7 @@ import sys
 
 from pcxa._api import APIClient
 from pcxa._config import get_profile, load_config
-from pcxa._http import requests, set_default_timeout
+from pcxa._http import EdgeBlockedError, describe_edge_block, requests, set_default_timeout
 from pcxa._parser import build_parser
 from pcxa._resolve import resolve_ids
 from pcxa._update import _check_for_update, _print_update_notice
@@ -396,6 +396,18 @@ def main():
             parser.print_help()
         if isinstance(rc, int) and not isinstance(rc, bool) and rc != 0:
             sys.exit(rc)
+    except EdgeBlockedError as e:
+        # Must precede the HTTPError arm — EdgeBlockedError subclasses it.
+        # Printing the interstitial's HTML here is what made #1946 read as a
+        # permissions problem for two days, so we print the diagnosis instead.
+        print(f"Blocked at the edge: {describe_edge_block(e.response)}", file=sys.stderr)
+        print(
+            "The request never reached PCXA. If this is an upload, the file's "
+            "bytes matched a WAF signature; report the filename on "
+            "https://github.com/PCX-Analytics/pcxa/issues/1946",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     except requests.HTTPError as e:
         print(f"API error: {e}", file=sys.stderr)
         if e.response is not None:

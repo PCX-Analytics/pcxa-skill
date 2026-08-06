@@ -1,7 +1,8 @@
 """Stdlib-only HTTP client compatible with a small subset of `requests`.
 
 Exports:
-    HTTPError, ConnectionError, Response, Session, RequestsCompat
+    HTTPError, EdgeBlockedError, ConnectionError, Response, Session,
+    RequestsCompat
     requests   — singleton (== RequestsCompat) used like `requests.get(...)`
 
 Connection pooling:
@@ -47,6 +48,53 @@ class HTTPError(Exception):
     def __init__(self, response):
         self.response = response
         super().__init__(f"{response.status_code} {response.reason}: {response.url}")
+
+
+class EdgeBlockedError(HTTPError):
+    """The CDN/WAF in front of the API rejected the request — the app never saw it.
+
+    Subclasses ``HTTPError`` so existing ``except HTTPError`` handlers keep
+    working; catch this first when the distinction matters.
+
+    Cloudflare answers a blocked request with an HTML interstitial and a 403,
+    which is indistinguishable from a genuine permission denial unless you
+    look at the body. That cost real debugging time on #1946, where a managed
+    WAF rule matched an SQLi/XSS signature *inside* the bytes of ordinary
+    PDF/XLSX uploads and rejected 62 of 110,864 files — deterministically, on
+    content, forever. Naming the failure is what lets a caller tell "you are
+    not allowed to do this" apart from "the edge ate your request".
+    """
+
+
+def is_edge_block(response):
+    """True when ``response`` is a CDN/WAF interstitial rather than an API reply.
+
+    Deliberately narrow. The API is JSON-only, so an HTML body on a 403/406/503
+    already means something upstream answered instead of Django. Requiring the
+    HTML *and* the status keeps a legitimate DRF ``403 {"detail": ...}`` from
+    ever being misreported as an edge block.
+    """
+    if response.status_code not in (403, 406, 503):
+        return False
+    content_type = (response.headers.get("content-type") or "").lower()
+    if "html" not in content_type:
+        return False
+    return True
+
+
+def describe_edge_block(response):
+    """One-line, actionable summary of an edge block — never raw HTML."""
+    ray = response.headers.get("cf-ray") or ""
+    server = (response.headers.get("server") or "").lower()
+    vendor = "Cloudflare" if ("cloudflare" in server or ray) else "The CDN/WAF"
+    detail = (
+        f"{vendor} blocked this request before it reached the API "
+        f"({response.status_code} at {response.url}). This is an edge rule, "
+        f"not a permission denial — retrying will fail identically."
+    )
+    if ray:
+        detail += f" cf-ray={ray}"
+    return detail
 
 
 class ConnectionError(Exception):
@@ -299,6 +347,8 @@ class Response:
 
     def raise_for_status(self):
         if self.status_code >= 400:
+            if is_edge_block(self):
+                raise EdgeBlockedError(self)
             raise HTTPError(self)
 
     def close(self):
@@ -556,6 +606,7 @@ class Session:
 
 class RequestsCompat:
     HTTPError = HTTPError
+    EdgeBlockedError = EdgeBlockedError
     ConnectionError = ConnectionError
     Session = Session
 
@@ -581,6 +632,9 @@ requests = RequestsCompat
 
 __all__ = [
     "HTTPError",
+    "EdgeBlockedError",
+    "is_edge_block",
+    "describe_edge_block",
     "ConnectionError",
     "Response",
     "Session",

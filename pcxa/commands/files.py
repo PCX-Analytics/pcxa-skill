@@ -647,8 +647,9 @@ def cmd_files_upload(client, args):
     chunks. Files larger than --multipart-threshold-mb use multipart
     presign so they bypass R2's single-PUT failure mode (>~75MB).
 
-    Single-file path: backwards-compatible behavior — multipart POST for
-    small files, presign+PUT for large.
+    Single-file path: presign+PUT then POST /files/ with JSON metadata, so
+    the call still returns the full File row. Bytes never transit the API
+    origin at any size — see ``_upload_via_presign``.
     """
     file_paths = []
     for p in args.paths:
@@ -692,9 +693,19 @@ def cmd_files_upload(client, args):
             result = _upload_via_multipart_presign(
                 client, fp, title, args.folder, tags, part_size=part_size, concurrency=concurrency
             )
-        elif file_size > 10 * 1024 * 1024:
-            # Existing single-file presign path — back-compat for callers
-            # that rely on POST /files/ returning the full File row.
+        else:
+            # Presign at every size. This branch used to POST the bytes
+            # through the API origin for files <= 10MB, which put opaque
+            # user documents in front of Cloudflare's managed WAF: 62 of
+            # 110,864 files in one load were permanently rejected with a
+            # 403 "Blocked" HTML page because some byte sequence inside a
+            # PDF/XLSX matched an SQLi/XSS signature. Renaming the file
+            # changed nothing; truncating its body fixed it — it was the
+            # content. Nothing >= 10MB was ever affected, because that
+            # band already took this path (PCX-Analytics/pcxa#1946).
+            #
+            # POST /files/ still runs, but with a small JSON metadata body
+            # the WAF has no reason to reject.
             result = _upload_via_presign(
                 client,
                 fp,
@@ -704,8 +715,6 @@ def cmd_files_upload(client, args):
                 client._url("files/presign-upload/"),
                 client._url("files/"),
             )
-        else:
-            result = _upload_via_multipart(client, fp, title, args.folder, tags, client._url("files/"))
 
         if args.format == "json":
             out_json(result)
@@ -1007,25 +1016,12 @@ def _multipart_presign_and_put(client, fp, *, folder, part_size, concurrency):
     return item
 
 
-def _upload_via_multipart(client, fp, title, folder, tags, url):
-    """Small files: single multipart POST (bytes through server)."""
-    import mimetypes
-
-    data_fields = {"title": title}
-    if folder:
-        data_fields["folder"] = str(folder)
-    for i, tag in enumerate(tags):
-        data_fields[f"tags[{i}]"] = tag
-
-    content_type = mimetypes.guess_type(fp.name)[0] or "application/octet-stream"
-    with open(fp, "rb") as fh:
-        files = {"file_upload": (fp.name, fh, content_type)}
-        resp = client._request("POST", url, data=data_fields, files=files)
-    return resp.json()
-
-
 def _upload_via_presign(client, fp, title, folder, tags, presign_url, create_url):
-    """Large files: 3-step presign flow (upload directly to storage provider)."""
+    """3-step presign flow (upload directly to storage provider).
+
+    Used for every single-file upload up to the multipart threshold. Bytes
+    go to the storage provider, not the API origin — see #1946.
+    """
     import mimetypes
 
     content_type = mimetypes.guess_type(fp.name)[0] or "application/octet-stream"
@@ -1115,10 +1111,11 @@ def _upload_via_multipart_presign(client, fp, title, folder, tags, *, part_size,
 def cmd_files_upload_version(client, args):
     """Upload a new version of an existing file.
 
-    Hits POST /files/{id}/upload_new_version/ on the backend. Small files
-    (≤ 10 MB) go through multipart POST; larger ones use the presign flow
-    (identical to `files upload`) then reference the resulting storage_key
-    in the version create payload.
+    Hits POST /files/{id}/upload_new_version/ on the backend via the presign
+    flow (identical to `files upload`), referencing the resulting storage_key
+    in the version create payload. Bytes go straight to storage at every
+    size — the small-file branch that pushed them through the API origin was
+    removed in PCX-Analytics/pcxa#1946.
     """
     fp = Path(args.path)
     if not fp.exists() or not fp.is_file():
@@ -1126,42 +1123,23 @@ def cmd_files_upload_version(client, args):
         sys.exit(1)
 
     file_size = fp.stat().st_size
-    large_file_threshold = 10 * 1024 * 1024
 
     version_url = client._url(f"files/{args.file_id}/upload_new_version/")
 
     if args.dry_run:
-        mode = "presign" if file_size > large_file_threshold else "multipart"
         print(f"Would UPLOAD new version of file id={args.file_id} "
-              f"from {fp.name} ({file_size:,} bytes, {mode})")
+              f"from {fp.name} ({file_size:,} bytes, presign)")
         return
 
     print(f"Uploading new version of file {args.file_id}: {fp.name} "
           f"({file_size:,} bytes) ...", end=" ", flush=True)
 
-    if file_size > large_file_threshold:
-        result = _upload_version_via_presign(client, fp, args.file_id, args.notes, version_url)
-    else:
-        result = _upload_version_via_multipart(client, fp, args.notes, version_url)
+    result = _upload_version_via_presign(client, fp, args.file_id, args.notes, version_url)
 
     if args.format == "json":
         out_json(result)
     else:
         print(f"OK — version_id={result.get('id')} v{result.get('version_number')}")
-
-
-def _upload_version_via_multipart(client, fp, notes, version_url):
-    """Small-file path: direct multipart POST to upload_new_version."""
-    import mimetypes
-
-    content_type = mimetypes.guess_type(fp.name)[0] or "application/octet-stream"
-    data_fields = {}
-    if notes:
-        data_fields["version_notes"] = notes
-    with open(fp, "rb") as fh:
-        files = {"file_upload": (fp.name, fh, content_type)}
-        resp = client._request("POST", version_url, data=data_fields, files=files)
-    return resp.json()
 
 
 def _upload_version_via_presign(client, fp, file_id, notes, version_url):
