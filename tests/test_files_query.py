@@ -5,9 +5,12 @@ This is the precise channel: unranked and countable, unlike the ranked
 50-capped ``files search``, and structurally expressive, unlike
 ``files list --search/--content``.
 
-Not called "exhaustive" on purpose: multi-term content ``AND`` is currently
-chunk-scoped and under-reports (~70% missed on a measured project), so the
-skill documents the count as a floor. See ``cmd_files_query``'s docstring.
+Not called "exhaustive" on purpose: multi-term content ``AND`` is chunk-scoped
+and under-reports (~60-70% missed on measured projects) wherever the
+file-scoped fix is not yet enabled. That fix rolls out **per project**, and
+``count_exact: true`` comes back on BOTH paths — the old one labels a wrong
+number exact whenever it lands under the ceiling — so a caller cannot tell
+from the response which behaviour it got. See ``cmd_files_query``'s docstring.
 
 The parse explain-back and the exactness of the count are asserted
 deliberately — a result set whose interpretation you cannot verify is not one

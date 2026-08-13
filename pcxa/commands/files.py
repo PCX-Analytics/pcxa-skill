@@ -302,14 +302,23 @@ def cmd_files_query(client, args):
     returns an unranked result set in stable id order, and unlike
     ``files list --search/--content`` it can express real boolean structure.
 
-    **Completeness caveat — do not describe this as exhaustive today.** Two or
-    more CONTENT terms joined by ``AND`` are compiled against the per-chunk
-    text vector, so a match requires the terms to land in the *same passage*
-    (~3,000 chars) rather than merely the same file. Measured on a real
-    project: 1,042 files returned where 3,496 contain both terms (~70%
-    missed). A single content term, ``title:`` predicates, ``OR`` and ``NOT``
-    are unaffected. A server-side fix makes ``AND`` file-scoped; when it is
-    enabled, counts on existing ``AND`` queries go UP.
+    **Completeness caveat — multi-term ``AND`` is fixed PER PROJECT, and the
+    response does not say which behaviour you got.** Where the server-side fix
+    is not yet enabled, two or more CONTENT terms joined by ``AND`` compile
+    against the per-chunk text vector, so a match requires the terms to land in
+    the *same passage* (~3,000 chars) rather than merely the same file.
+    Measured: 1,042 returned where 3,496 match (~70% missed); on another shape
+    3,738 returned where 9,342 match (~60% missed).
+
+    ``count_exact: true`` is returned on BOTH paths — the unfixed one labels a
+    wrong number exact whenever it lands under the ceiling — so it cannot be
+    used to tell them apart. Do not rest a completeness or "not located"
+    finding on a multi-term ``AND`` without confirming the fix is live for that
+    project; otherwise run each term separately and intersect the ids.
+
+    A single content term, ``title:`` predicates, ``OR`` and ``NOT`` are
+    unaffected. When the fix reaches a project, counts on existing ``AND``
+    queries go UP — that is the correction, not a regression.
 
         pcxa files query 'title:schedule AND precast AND delay'
         pcxa files query 'title:report AND (delay OR "change order")'
