@@ -19,15 +19,13 @@ maintaining its own id table.
 
 Two things about this command are load-bearing and easy to get wrong:
 
-**Pacing defaults to the vector-lake drain rate, not the API rate limit.**
-Every upserted vector is mirrored from Pinecone (the rebuildable serving index)
-into R2/Lance (the system-of-record) through a DB outbox drained by a single
-writer at ~60k chunks/hour. The endpoint will happily accept ~150x that. Past
-the outbox's depth ceiling the mirror *sheds*: vectors serve fine but the
-durable copy is dropped, recoverable only by an operator running
-``manage.py reconcile_vector_lake --apply`` afterwards. So the default is to
-pace to the drain rate. ``--chunks-per-hour 0`` opts out; do that only if
-someone has agreed to run the reconcile.
+**Pacing is a client-side smoother, not a durability requirement.** The server
+rate-limits this endpoint to 30 requests/minute per user; at the 5,000-chunk
+ceiling per request that is far more headroom than most loads need.
+``--chunks-per-hour`` keeps the client's own request rate comfortably under
+that limit and defaults to 60,000. Raising it, or disabling it with ``0``, is
+safe: the client already honours ``Retry-After`` on a 429, and durable storage
+of an accepted chunk is handled server-side with nothing for the caller to do.
 
 **Embeddings are all-or-nothing per file.** The server marks a file INDEXED
 only when *every* chunk in it carries a vector; one missing embedding demotes
@@ -45,8 +43,8 @@ from pathlib import Path
 from pcxa._output import out_json
 
 # ── Server contract, mirrored so we fail fast with a useful message instead of
-# posting a payload the serializer will reject. Keep in sync with
-# api/semantic_search/serializers.py (STAFF_UPLOAD_MAX_*).
+# posting a payload the API will reject. These track the documented limits of
+# the upload-chunks endpoint; a 400 naming a different bound means they drifted.
 MAX_FILES_PER_REQUEST = 50
 MAX_CHUNKS_PER_REQUEST = 5_000
 MAX_CHUNKS_PER_FILE = 2_000
@@ -54,9 +52,10 @@ MAX_CONTENT_CHARS = 16_000
 EMBEDDING_DIMENSIONS = 768
 DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
 
-# Single-writer vector-lake drain: 5,000 rows per */5min tick (see the module
-# docstring). This is the real throughput ceiling for a durable load.
-LAKE_DRAIN_CHUNKS_PER_HOUR = 60_000
+# Default client-side pacing. Well under the endpoint's 30 requests/minute
+# limit; see the module docstring. Not a durability constraint — raise or
+# disable it freely when a load needs to move faster.
+DEFAULT_CHUNKS_PER_HOUR = 60_000
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 RETRIES = 4
@@ -278,9 +277,9 @@ def _validate_record(record, *, source, line_no, by_path, by_name):
 class Pacer:
     """Sleep so the cumulative chunk rate stays under ``chunks_per_hour``.
 
-    Deliberately a cumulative-average governor rather than a token bucket: the
-    thing being protected is a *backlog* (the lake outbox), so what matters is
-    total chunks over total elapsed time, not smoothness. 0 disables.
+    Deliberately a cumulative-average governor rather than a token bucket: what
+    matters for a long backfill is total chunks over total elapsed time, not
+    per-second smoothness. 0 disables.
     """
 
     def __init__(self, chunks_per_hour):
@@ -406,9 +405,9 @@ def cmd_files_upload_chunks(client, args):
     pacer = Pacer(0 if args.dry_run else args.chunks_per_hour)
     if pacer.limit and not args.dry_run:
         _progress(
-            f"Pacing at {pacer.limit:,} chunks/hour to match the vector-lake drain rate. "
-            f"Use --chunks-per-hour 0 to disable (then an operator must run "
-            f"`reconcile_vector_lake --apply` afterwards)."
+            f"Pacing at {pacer.limit:,} chunks/hour. This is a client-side default, "
+            f"not a server requirement — raise it with --chunks-per-hour N, or pass 0 "
+            f"to upload as fast as the API's rate limit allows."
         )
 
     summary = {
@@ -566,8 +565,7 @@ def cmd_files_set_index_mode(client, args):
 
     ``none`` is what stops our own chunker from processing files whose chunks
     are about to be supplied. Without it every file is chunked server-side
-    first: harmless (the upload replaces it) but pure waste at corpus scale,
-    and XLSX in particular is a known CPU hog on the ingest workers.
+    first: harmless (the upload replaces it) but pure waste at corpus scale.
     """
     as_json = getattr(args, "format", "table") == "json"
 

@@ -102,7 +102,7 @@ pcxa files query 'title:"Case Memo"' --count-only        # true LITERAL phrase o
 pcxa files list --content "IOCC-387"                     # literal substring in file BODY — every match, paginated (stable id order)
 pcxa files list --content "IOCC-387" --count-only        # exact total of content matches (count:0 = genuinely not located)
 pcxa files list --tags "urgent,review" --tags-mode all   # AND: files with ALL tags
-pcxa files search "natural language query"                    # hybrid BM25 + semantic (same endpoint as the web UI)
+pcxa files search "natural language query"                    # hybrid keyword + semantic (same endpoint as the web UI)
 pcxa files search "query" --scope file,activity               # restrict source types (csv: file,activity,drawing,photo)
 pcxa files search "query" --ext PDF --limit 25                # narrow to file type, page-size up to 50
 pcxa files content "BRG report" --ext PDF                     # alias of `files search` scoped to files (same hybrid endpoint)
@@ -192,31 +192,30 @@ with nothing to detect it afterwards.
 You do **not** need to supply identifier metadata — the server extracts
 RFI/PCO/CO/NCR-style references from the `content` you send.
 
-### ⚠️ Pacing: the default is deliberate, and it is not the rate limit
+### Pacing: a client-side default you can safely raise
 
-Every vector is mirrored from Pinecone (the rebuildable serving index) into
-R2/Lance (the **system of record**) through an outbox drained by a *single*
-writer at ~60,000 chunks/hour. The endpoint accepts roughly **150× faster than
-that.** Past the outbox's depth ceiling the mirror **sheds**: your vectors serve
-fine, but the durable copy is dropped and only an operator running
-`reconcile_vector_lake --apply` can rebuild it.
+`--chunks-per-hour` defaults to **60,000**, which keeps a long backfill
+comfortably under the endpoint's limit of **30 requests/minute per user**. This
+is client-side pacing only. It is **not** a durability constraint, and nothing
+downstream requires the upload to be slow.
 
-So `--chunks-per-hour` defaults to **60,000** — matching the drain, not the API
-throttle. `--chunks-per-hour 0` uploads as fast as the server allows; only do
-that if someone has agreed to run the reconcile afterwards.
+Raise it for a large corpus, or pass `--chunks-per-hour 0` to upload as fast as
+the rate limit allows — at the 5,000-chunk maximum per request that is a great
+deal of headroom. Either way the client retries `429`s honouring `Retry-After`,
+and once a chunk is accepted the server is responsible for storing it durably;
+there is no follow-up step for you to run.
 
 ### Why `set-index-mode --mode none` first
 
 Without it, our own chunker processes every file before your chunks arrive. That
 is *harmless* — your upload replaces whatever it produced, and the guards below
-then protect it — but it is pure waste at corpus scale, and XLSX in particular is
-a known CPU hog on the ingest workers. `--mode none` skips it entirely; your
-upload still creates the index row.
+then protect it — but it is pure waste at corpus scale. `--mode none` skips it
+entirely; your upload still creates the index row.
 
 ### After a successful upload, the server leaves your chunks alone
 
-- The chunker skips the file on any redrive (reconcile retries, stray redispatch).
-- A staff re-run refuses unless explicitly forced.
+- Server-side reprocessing will not re-chunk the file: retries and re-runs leave
+  your chunks in place.
 - Index-policy changes — including a project left at the default `selective` —
   neither delete your chunks nor strip their vectors.
 - Uploading a **new version** of the file keeps your chunks and marks the index
@@ -266,7 +265,7 @@ Search results include `url` fields — always show these to users for document 
 
 **`files query` response shape:** `{query, parsed, results, total_files, count_exact, limit, offset}`. `parsed` is the canonical interpretation of your expression — surface it to the user when the result set matters. `count_exact: false` means `total_files` is a floor (ceiling reached), not a total. Rows carry `file_id`, `file_name`, `file_type`, `folder_path`, and a `url`.
 
-**Search response shape:** `pcxa files search` returns `{query, total_results, results, hybrid_enabled}` — a top-N reranked list (server-capped at 50). Each row carries `score`, `file_id`/`activity_id`, `file_name`/`title`, `folder_path`, `page_number`, `chunk_position`, and a `url`. Hybrid means the result is the union of Pinecone semantic similarity and BM25 over the project's chunk text, RRF-fused and Cohere-reranked — the same path the web UI's search bar uses.
+**Search response shape:** `pcxa files search` returns `{query, total_results, results, hybrid_enabled}` — a top-N reranked list (server-capped at 50). Each row carries `score`, `file_id`/`activity_id`, `file_name`/`title`, `folder_path`, `page_number`, `chunk_position`, and a `url`. Hybrid means semantic similarity and keyword matching over the project's chunk text are combined and reranked into a single ordering — the same path the web UI's search bar uses.
 
 **Four ways to find files — pick by what you need:**
 - **`files list --search <term>`** — matches the **title/filename** only (trigram). Paginated + countable. Use when you know part of the name.
@@ -342,7 +341,7 @@ pcxa files update 10 --title "New" --tags a,b --folder 5      # single file upda
 ]}
 ```
 
-`tags bulk --file plan.json` is the tag-only view of the same endpoint — rows are `{file_id, tags, tag_mode}` and scalar fields (title/category/description) are rejected with a pointer to `files bulk-patch`. `folder` is not patchable via either command (folder moves recompute privacy/aggregates — use `pcxa move`). Empty `tags` in `set` mode is refused client- and server-side to prevent an accidental mass tag-wipe; use `tag_mode: remove` to clear specific tags. Add `--dry-run` to preview the plan without sending. Both are `bulk_patch`-backed; the older `tags add/remove/set` and `bulk_update` path is now set-based server-side (pmapp2 #1265) but unchanged for callers.
+`tags bulk --file plan.json` is the tag-only view of the same endpoint — rows are `{file_id, tags, tag_mode}` and scalar fields (title/category/description) are rejected with a pointer to `files bulk-patch`. `folder` is not patchable via either command (folder moves recompute privacy/aggregates — use `pcxa move`). Empty `tags` in `set` mode is refused client- and server-side to prevent an accidental mass tag-wipe; use `tag_mode: remove` to clear specific tags. Add `--dry-run` to preview the plan without sending. Both are `bulk_patch`-backed; the older `tags add/remove/set` and `bulk_update` path is now set-based server-side, but unchanged for callers.
 
 ## Activities
 

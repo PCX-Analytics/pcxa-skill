@@ -428,8 +428,8 @@ def _resolve_proxy(scheme, target_host):
     subprocess is sandboxed, then strips the sandbox's network
     namespace; without honoring those vars, every outbound request
     dies with ``socket.gaierror`` because there's no route to the
-    target host. Surfaces in pmapp2 as "pcxa can't reach
-    http://django:8000".
+    target host. Surfaces to the user as "pcxa can't reach" the
+    configured API base URL.
     """
     no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
     if no_proxy.strip() == "*":

@@ -224,11 +224,10 @@ Three things worth knowing before a large load:
 - **Embeddings must be 768-dim and all-or-nothing per file.** A file with vectors
   on only some chunks is rejected, because the server would silently re-embed the
   whole file at your cost.
-- **`--chunks-per-hour` defaults to 60,000, which is not the API rate limit.** It
-  matches the single-writer rate at which vectors are mirrored into the durable
-  store; the endpoint itself accepts ~150× faster, and past a backlog ceiling the
-  durable copy is shed and needs an operator to rebuild. Override with `0` only if
-  someone has agreed to run that reconcile.
+- **`--chunks-per-hour` defaults to 60,000, well under the endpoint's limit of 30
+  requests/minute.** It is client-side pacing, not a durability constraint: raise
+  it, or pass `0` to disable it and upload as fast as the rate limit allows. 429s
+  are retried honouring `Retry-After` either way.
 - **You need project-admin or company-admin** on the target project. Chunk upload
   replaces a file's entire indexed content, so it takes the same gate as other
   bulk file operations.

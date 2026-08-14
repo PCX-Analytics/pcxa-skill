@@ -1,5 +1,5 @@
 """Tests for `files bulk-patch` and `tags bulk`, which route through the
-server-side POST .../files/bulk_patch/ endpoint (pmapp2 PR #1283 / issue #1265).
+server-side POST .../files/bulk_patch/ endpoint.
 
 Unlike files/bulk_update/ (one tag set applied to every id), each plan row
 carries its own values, so different files can get different tags/metadata in
