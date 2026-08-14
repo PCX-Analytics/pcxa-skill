@@ -102,10 +102,10 @@ def cmd_files_list(client, args):
 def cmd_files_search(client, args):
     """Semantic + keyword (hybrid) search — same endpoint the web UI uses.
 
-    Routes through ``semantic-search/search/`` (Pinecone semantic + BM25
-    over the GIN-indexed ``FileChunk.search_vector`` + Cohere rerank).
+    Routes through ``semantic-search/search/``, which combines semantic and
+    keyword matching over the project's chunk text and reranks the result.
     """
-    # The endpoint is a Cohere-reranked top-N hard-capped at 50 server-side; it
+    # The endpoint returns a reranked top-N hard-capped at 50 server-side; it
     # returns a ranked list, NOT a count. Clamp the sent limit and tell the user
     # so `--limit 200` isn't silently truncated to a misleading "50".
     requested = args.page_size
@@ -387,8 +387,7 @@ def cmd_files_content(client, args):
     """Keyword search in indexed file text.
 
     Routes through the same endpoint the web UI search bar uses
-    (semantic-search/search/) — hybrid BM25 + semantic with Cohere
-    reranking.
+    (semantic-search/search/) — hybrid keyword + semantic, reranked.
     """
     params = {"q": args.query, "limit": args.limit, "source_types": "file"}
     if args.ext:

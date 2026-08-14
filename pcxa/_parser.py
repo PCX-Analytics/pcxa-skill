@@ -16,7 +16,7 @@ from pcxa.commands.chunks import (
     EMBEDDING_DIMENSIONS as CHUNK_EMBEDDING_DIMENSIONS,
 )
 from pcxa.commands.chunks import (
-    LAKE_DRAIN_CHUNKS_PER_HOUR as CHUNK_LAKE_DRAIN_PER_HOUR,
+    DEFAULT_CHUNKS_PER_HOUR as CHUNK_DEFAULT_PER_HOUR,
 )
 from pcxa.commands.tags_folders import DELETION_TAG
 
@@ -190,7 +190,7 @@ def build_parser():
 
     p = files_sub.add_parser(
         "content",
-        help="Keyword search in file text (hybrid BM25 + semantic, same as web UI)",
+        help="Keyword search in file text (hybrid keyword + semantic, same as web UI)",
     )
     p.add_argument("query", help="Keyword/phrase")
     p.add_argument("--ext", help="File type filter")
@@ -377,14 +377,12 @@ def build_parser():
                    help="JSON resume state. Applied file ids are recorded, so a re-run "
                         "after an interruption skips them.")
     p.add_argument("--chunks-per-hour", dest="chunks_per_hour", type=int,
-                   default=CHUNK_LAKE_DRAIN_PER_HOUR,
-                   help=f"Throughput governor (default: {CHUNK_LAKE_DRAIN_PER_HOUR:,}). "
-                        f"Matches the single-writer vector-lake drain rate, NOT the API "
-                        f"rate limit — the endpoint accepts ~150x faster than the durable "
-                        f"copy is written, and past the outbox ceiling the mirror sheds "
-                        f"(vectors still serve; the durable copy is dropped). 0 disables; "
-                        f"only do that if an operator will run `reconcile_vector_lake "
-                        f"--apply` afterwards.")
+                   default=CHUNK_DEFAULT_PER_HOUR,
+                   help=f"Client-side pacing (default: {CHUNK_DEFAULT_PER_HOUR:,}). Keeps "
+                        f"the upload well under the endpoint's 30 requests/minute limit. "
+                        f"Not a durability constraint — raise it, or pass 0 to disable it "
+                        f"and go as fast as the rate limit allows; 429s are retried "
+                        f"honouring Retry-After either way.")
     p.add_argument("--files-per-request", dest="files_per_request", type=int, default=50,
                    help="Files per request (default/server max: 50).")
     p.add_argument("--chunks-per-request", dest="chunks_per_request", type=int, default=5000,

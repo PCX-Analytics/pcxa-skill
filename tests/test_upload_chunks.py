@@ -329,9 +329,9 @@ def test_per_item_server_error_is_reported_not_swallowed(client, tmp_path, capsy
 # ── pacing ───────────────────────────────────────────────────────────────────
 
 
-def test_pacer_defaults_to_the_lake_drain_rate():
-    """Guards the number, because it is the reason the default exists."""
-    assert C.LAKE_DRAIN_CHUNKS_PER_HOUR == 60_000
+def test_pacer_default_rate():
+    """Guards the documented default, which README/SKILL.md/--help all state."""
+    assert C.DEFAULT_CHUNKS_PER_HOUR == 60_000
 
 
 def test_pacer_sleeps_when_ahead_of_the_budget(monkeypatch):

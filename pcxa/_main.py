@@ -398,13 +398,13 @@ def main():
             sys.exit(rc)
     except EdgeBlockedError as e:
         # Must precede the HTTPError arm — EdgeBlockedError subclasses it.
-        # Printing the interstitial's HTML here is what made #1946 read as a
-        # permissions problem for two days, so we print the diagnosis instead.
+        # Printing the interstitial's HTML here reads as a permissions problem,
+        # which costs hours of misdiagnosis; print the diagnosis instead.
         print(f"Blocked at the edge: {describe_edge_block(e.response)}", file=sys.stderr)
         print(
             "The request never reached PCXA. If this is an upload, the file's "
             "bytes matched a WAF signature; report the filename on "
-            "https://github.com/PCX-Analytics/pcxa/issues/1946",
+            "https://github.com/PCX-Analytics/pcxa-skill/issues",
             file=sys.stderr,
         )
         sys.exit(1)
