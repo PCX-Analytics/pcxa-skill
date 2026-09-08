@@ -45,6 +45,7 @@ from pcxa.commands.files import (
     cmd_files_upload_version,
 )
 from pcxa.commands.chunks import cmd_files_set_index_mode, cmd_files_upload_chunks
+from pcxa.commands.ocr import cmd_files_upload_ocr
 from pcxa.commands.sync import cmd_files_sync
 from pcxa.commands.tags_folders import (
     cmd_categorize,
@@ -73,6 +74,7 @@ from pcxa.commands.activities import (
     cmd_activities_delete,
     cmd_activities_get,
     cmd_activities_list,
+    cmd_activities_related,
     cmd_activities_types,
     cmd_activities_update,
     cmd_comments_add,
@@ -209,6 +211,7 @@ SUB_HANDLERS = {
         "upload": cmd_files_upload, "upload-version": cmd_files_upload_version,
         "sync": cmd_files_sync,
         "upload-chunks": cmd_files_upload_chunks,
+        "upload-ocr": cmd_files_upload_ocr,
         "set-index-mode": cmd_files_set_index_mode,
         "update": cmd_file_update,
         "delete": cmd_files_delete, "restore": cmd_files_restore, "purge": cmd_files_purge,
@@ -225,6 +228,7 @@ SUB_HANDLERS = {
         "list": cmd_activities_list, "get": cmd_activities_get, "create": cmd_activities_create,
         "update": cmd_activities_update, "delete": cmd_activities_delete,
         "bulk-update": cmd_activities_bulk_update, "types": cmd_activities_types,
+        "related": cmd_activities_related,
     },
     "steps": {
         "list": cmd_steps_list, "create": cmd_steps_create, "update": cmd_steps_update,

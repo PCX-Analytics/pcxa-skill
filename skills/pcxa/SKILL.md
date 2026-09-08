@@ -128,6 +128,8 @@ pcxa files restore 123 124                               # remove 'to_delete' ta
 pcxa files list --tags to_delete                         # list everything pending deletion
 pcxa files set-index-mode 1 2 3 --mode none              # stop server-side indexing (BYOC prep)
 pcxa files upload-chunks corpus.jsonl --manifest .pcxa-sync.json   # supply your own chunks + vectors
+pcxa files upload-ocr ocr.jsonl --manifest .pcxa-sync.json --validate-only  # dry-run your own OCR
+pcxa files upload-ocr ocr.jsonl --manifest .pcxa-sync.json         # supply your own OCR (text + boxes)
 ```
 
 **Upload storage:** Small files are uploaded through the API. Larger files use a presigned upload flow handled by the CLI and API.
@@ -137,6 +139,12 @@ pcxa files upload-chunks corpus.jsonl --manifest .pcxa-sync.json   # supply your
 For a caller that runs its **own** extraction / chunking / embedding pipeline and
 wants PCXA to serve *its* index instead of re-deriving one. Files must exist
 first — chunks attach to them.
+
+> **If what you have is OCR page text, you want [`files
+> upload-ocr`](#bring-your-own-ocr-files-upload-ocr) instead.** Sending OCR
+> through this command succeeds — and silently discards your bounding boxes and
+> opts those files out of every future chunker improvement, because the rows are
+> marked `chunk_source=external` and are never re-derived.
 
 ```bash
 # 1. upload the files (idempotent, resumable, records file_ids in the manifest)
@@ -241,6 +249,170 @@ entirely; your upload still creates the index row.
   `--max-failures` (default 100) aborts a run that is clearly misconfigured.
 - **Rate limits** (`429`) are retried honouring `Retry-After`.
 - **Exit code is non-zero** if anything failed, so a driving script can tell.
+
+## Bring your own OCR (`files upload-ocr`)
+
+For a caller who **scanned the documents themselves**. You send page text —
+ideally with word- and line-level bounding boxes — and PCXA treats it as the
+file's authoritative text: it chunks it, extracts identifiers, indexes it for
+boolean search and embeds it, exactly as it would text from its own OCR
+provider.
+
+### Which of the two upload commands you want
+
+**This is the most common mistake with these two endpoints, and nothing tells
+you afterwards, because both succeed.**
+
+| | `upload-ocr` | `upload-chunks` |
+|---|---|---|
+| You have | page **text** from a scan | finished **chunks**, usually embedded |
+| Who chunks | **the server** | nobody — it stores what you send |
+| Geometry | preserved at full precision | no field for it |
+| Row marked | ordinary — re-derivable | `chunk_source=external`, never re-derived |
+| After acceptance | chunking → embedding, async | nothing |
+
+Send OCR through `upload-chunks` and you get a 200 and a searchable file — and
+you have silently thrown away every bounding box and opted those files out of
+every future chunker improvement. If you OCR'd a scan, use `upload-ocr`.
+
+(On a bring-your-own-chunks project `upload-ocr` refuses outright with
+`project_external_chunks_only`: those projects were promised the server never
+derives text server-side.)
+
+### Start with `--validate-only`
+
+```bash
+# 1. the dry run — writes nothing, reports refusals grouped by error_code
+pcxa files upload-ocr ./ocr/ --manifest .pcxa-sync.json --validate-only
+
+# 2. the real load, resumable
+pcxa files upload-ocr ./ocr/ --manifest .pcxa-sync.json --state .pcxa-ocr.json
+```
+
+The dry run is **server-side**, which is the point: it reports envelope shape
+errors *and* the state-machine refusals a client cannot see — whether each file
+is parked, already indexed, has an OCR batch in flight, belongs to a
+bring-your-own-chunks project. For a six-figure run that is the difference
+between discovering 8,000 unusable targets before scanning and after.
+
+It exits **0** when the run completed: refusals are its *output*, not its
+failure, so `validate && upload` is scriptable. Only client-side rejections and
+transport failures make it non-zero. `--dry-run` is an accepted alias.
+
+### Input
+
+JSON-Lines, one record per file, streamed — a corpus never has to fit in memory.
+
+```json
+{"file_id": 123, "envelope": {...}}
+{"path": "Sources/RFI-142.pdf", "overwrite": false, "envelope": {...}}
+```
+
+Per-record optional keys: `overwrite`, `file_version_id`, `provenance`. As with
+`upload-chunks`, `path`/`name` resolve through `--manifest`, and an ambiguous
+filename is rejected rather than guessed.
+
+The `envelope` is one of **two shapes, and that is the whole set** — a closed
+union. Do not invent a third, and do not send a layout envelope with null or
+fabricated boxes.
+
+**`pcxa.ocr_layout.v1`** — text with geometry. All coordinates 0–1 normalized,
+origin top-left. Positional arrays because this repeats per word across a corpus.
+
+```json
+{"schema": "pcxa.ocr_layout.v1",
+ "provenance": {"producer": "mxi-scanner/1.4", "tool_version": "1.4.0"},
+ "pages": [{"n": 1, "w": 2550, "h": 3300,
+            "lines": [{"t": "REINFORCED CONCRETE SLAB",
+                       "b": [0.08, 0.10, 0.92, 0.14],
+                       "c": 0.97,
+                       "words": [["REINFORCED", 0.08, 0.10, 0.24, 0.14, 0.99]]}]}]}
+```
+
+**`pcxa.text.v1`** — no geometry. Fully supported, and better than fabricated
+boxes; you lose only future geometry-dependent features, not retrieval.
+
+```json
+{"schema": "pcxa.text.v1",
+ "provenance": {"producer": "mxi-scanner/1.4"},
+ "pages": [{"n": 1, "text": "..."}]}
+```
+
+**Send full precision — do not round.** The stored copy is the master and
+everything downstream is re-derived from it, so rounding is irreversible loss
+taken to save storage that costs about $0.015/GB-month.
+
+### `202` does not mean searchable
+
+**This is the one that gets reported as a bug.** Acceptance means the text is
+durably stored. Chunking and embedding happen afterwards on a background queue,
+so the response cannot tell you the file is searchable and this command's exit
+does not mean "indexed". Read `pcxa files info <id>` / the index status for that.
+`upload-chunks` returns a terminal state; this does not.
+
+### Refusals are per-item, and most are not retryable
+
+Refused files are reported and skipped — retrying them only burns the rate
+limit. The end-of-run report is a **histogram by `error_code`**, not a wall of
+per-file lines (only the first 20 are echoed; `--error-log` gets every one).
+
+Not retryable: `index_parked` · `already_indexed` · `external_chunk_source` ·
+`project_external_chunks_only` · `index_excluded_by_policy` ·
+`file_version_mismatch` · `incomplete_page_coverage` · `has_server_text` ·
+`has_ocr_text` · `derivation_pending` · `not_found`.
+
+Transient, and worth retrying: `ocr_batch_in_flight` · `chunking_in_progress`.
+These are deliberately **not** recorded in `--state`, so re-running with the
+same state file retries exactly those.
+
+Two will confuse a caller, so the CLI explains them inline:
+
+- **`index_parked` is a decision, not an error.** Someone excluded that file
+  from indexing on purpose, and this endpoint clears **no** park reasons. A
+  whole folder coming back parked means that folder is excluded deliberately.
+- **`incomplete_page_coverage`** only happens on a partially-OCR'd file, and
+  names the missing pages. Your upload must cover every page the server still
+  needs; it then stores only those, so text already extracted from the good
+  pages survives.
+
+`warnings` are advisory and are **not** failures. The common one — a word box
+outside its line box — is legitimate for rotated text.
+
+### Operational notes
+
+- **Auth: project admin or company admin**, same gate as `upload-chunks`. Give
+  the integration its own service account: every applied file is written to the
+  audit log with the acting user.
+- **Client-side validation mirrors the server** so a bad payload fails before it
+  costs a request: closed schema union, 1-indexed unique page numbers, bboxes
+  with `x1 > x0` / `y1 > y0` and all coords in `[0,1]`, positive `w`/`h`, and at
+  most 1,000 pages per file. `"lines": []` is a **legal blank page**; an empty
+  `pages` array is not.
+- **Confidence is optional, and `0` is rejected.** `0` asserts the text is
+  certainly wrong — it is a common exporter default, and a corpus carrying it
+  tells the ranker to distrust every line. Omit the field instead.
+- **Batching packs by bytes *and* file count** — 50 files/request and a 10 MB
+  body cap, where the body cap is a `413` raised *before* the body is parsed, so
+  nothing in the response would say which file was responsible. `--max-bytes`
+  (default 9 MB) is the byte budget. A single file whose envelope exceeds it is
+  rejected client-side: an envelope is that file's text master and cannot be
+  split across requests.
+- **Pacing** `--pages-per-hour` defaults to 250,000. The endpoint allows **120
+  requests/minute** — its own throttle scope, *not* `upload-chunks`' 30/min.
+  Client-side smoothing only: raise it, or pass `0` to disable. `429`s are
+  retried honouring `Retry-After` either way.
+- **Retries need no idempotency key.** Dedup is content-addressed and computed
+  server-side; a re-post of byte-identical content for the same file and version
+  returns `"deduplicated": true` and writes nothing new. Do **not** add an
+  `Idempotency-Key` header — the client cannot reproduce the server's canonical
+  JSON, so a client-computed key would be wrong in both directions.
+- **`--overwrite`** (default off) displaces text a file already has; a
+  per-record `"overwrite"` key wins over the flag. It never overrides
+  `already_indexed` or `index_parked`.
+- **Resume** with `--state`, exactly as `upload-chunks` does.
+
+**Not in scope:** producing the OCR. This command transports what a scanner
+emits.
 
 **Bulk tree sync (`files sync`):** Mirrors a local directory tree under a PCXA folder. Walks the tree, creates any missing subfolders to match, and uploads files in parallel via the same presign+PUT/multipart path as `files upload`. Idempotent two ways: it lists each target folder once and skips local files whose name already exists there, and an optional `--manifest <path>` persists `{relative_path → {size, file_id}}` so re-runs skip without hitting the API. Failures (network, register errors) are listed at the end and counted toward `error` rate. Progress is rendered live on stderr: a bar plus files-done, bytes-done/total, throughput, current concurrency (`c=N`), elapsed, ETA, and error count. Filters: `--include` and `--exclude` accept repeatable globs against filenames; dotfiles/dot-dirs are skipped by default (`--include-hidden` opts in).
 
@@ -357,10 +529,13 @@ pcxa activities get 123                                       # detail + steps +
 pcxa activities create --title "Review" --priority 3 --type 5 --assignees 1,2
 pcxa activities create --title "Pour slab" --custom-fields '{"3":"Acme Corp"}'  # custom-object value, fuzzy-validated
 pcxa activities update 123 --status completed --percent 100
+pcxa activities update 123 --outcome "Grain is one row per charge per register."
+pcxa activities update 123 --outcome ""                       # clear a wrong outcome
 pcxa activities update 123 --custom-fields '{"3":"Acme Corp"}' --no-fuzzy        # write value as-is
 pcxa activities delete 123 456                                # bulk delete
 pcxa activities bulk-update 1 2 3 --status in_progress
 pcxa activities types                                         # list templates
+pcxa activities related 123                                   # linked files/folders/photos/forms
 ```
 
 **Statuses:** `not_started`, `in_progress`, `completed` | **Priority:** 0=none, 1=low, 2=med, 3=high, 4=critical
@@ -371,6 +546,14 @@ pcxa activities types                                         # list templates
 - **Business justification** — why this work exists
 
 Do NOT put in descriptions: processing details, scripts, output file lists, status updates, or progress notes. Those belong in **comments** (`pcxa comments add`) as dated narrative entries.
+
+**`--outcome` is the answer; `--description` is the question.** Description is the brief — what was asked and why. Outcome is what the activity concluded or produced: the decision, the finding, the deliverable. It is *not* production or quantity (that is `--percent`), and it is deliberately not called "output", which in this codebase means measurable production. Put the conclusion here rather than burying it in the newest comment — outcome is semantically indexed, so "what did we decide" stays findable.
+
+Every edit is kept in the activity's history, so revising an outcome loses nothing. `--outcome ""` clears it.
+
+Two limits worth knowing before you plan around them:
+- **`bulk-update` has no `--outcome`.** The server's bulk allow-list rejects the field, and an outcome is per-activity by definition. Update them one at a time.
+- **`activities list --search` does not read outcomes.** Server-side search covers title, description and WBS code only. The outcome *is* indexed for semantic search, so `pcxa chat send` can find it when `--search` cannot.
 
 **Date filters:** `--after`/`--before` filter by last updated; `--created-after`/`--created-before` filter by creation date. Accepts `YYYY-MM-DD` or relative keywords: `today`, `last_7_days`, `this_month`, `last_quarter`, etc.
 
@@ -385,6 +568,43 @@ Do NOT put in descriptions: processing details, scripts, output file lists, stat
 ```bash
 pcxa activities list --assignee "John" --after 2026-03-01 --before 2026-03-31
 ```
+
+### Related items (`activities related`)
+
+What is attached to an activity — files, folders, photos, form submissions and
+records — in **one call, in both directions**. This is the CLI view of the web
+app's "Related items" rail.
+
+```bash
+pcxa activities related 123                       # everything linked, either direction
+pcxa activities related 123 --types file,folder   # only files and folders
+pcxa activities related 123 --all                 # follow cursors to the end
+pcxa activities related 123 --limit 100           # rows per page
+```
+
+The `dir` column says which way the link points: `->` the activity is the
+link's source, `<-` it is the target.
+
+Prefer this over two `links list` calls. Links point either way, so the flat
+endpoint needs one query for `--source activity:123`, another for `--target
+activity:123`, and a merge; this is anchored on the activity and resolves the
+far end of every edge for you. It also runs on the project-scoped route, where
+the company and project permission gates actually fire.
+
+**It does not report a total, and that is deliberate** — an exact count would
+mean enumerating and permission-filtering the whole neighbourhood. So the row
+count is what was fetched, never what exists. Three notices tell you when the
+view is partial, and all three go to stderr:
+
+- **`... cannot be resolved by this endpoint and are NOT listed above`** — a
+  link of that type exists on the activity but this endpoint cannot hydrate it.
+  **Drawings are the common case**: `links create --target drawing:N` works and
+  the web app makes them, but `related` cannot show them. Use
+  `pcxa links list --source activity:123` to see those edges.
+- **`the server stopped scanning on its own budget`** — more links may exist
+  beyond what was scanned.
+- **`More results. Use --all, or --cursor …`** — pagination is cursor-based;
+  `--all` follows it, stopping after 50 pages and printing the cursor to resume.
 
 ## Steps (Subtasks)
 
@@ -701,7 +921,17 @@ pcxa locks delete 1
 
 Connect any two objects (files, activities, photos, drawings) with contextual descriptions. Object references use `type:id` format.
 
-**Types:** `file`, `activity`, `photo`, `drawing`, `source_document`, `project`
+**Types:** `activity`, `file`, `folder`, `photo`, `drawing`, `source_document`, `markup`, `project`, `company`, `formsubmission`, `fieldchoiceoption`
+
+An unknown type is rejected locally, with the valid set and a "did you mean?"
+suggestion, instead of costing a round-trip and coming back as a bare 400.
+
+To read an activity's links, prefer `pcxa activities related <id>` — one call,
+both directions, far ends resolved. Note the two type sets differ: every type
+above is *linkable*, but `related` can only resolve `activity`, `file`,
+`folder`, `photo`, `formsubmission` and `fieldchoiceoption`. Drawing links are
+creatable and visible to `links list`, but `related` reports them as omitted
+rather than showing them.
 
 ```bash
 pcxa links list --source file:170106                  # links from a file

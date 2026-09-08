@@ -18,6 +18,15 @@ from pcxa.commands.chunks import (
 from pcxa.commands.chunks import (
     DEFAULT_CHUNKS_PER_HOUR as CHUNK_DEFAULT_PER_HOUR,
 )
+from pcxa.commands.ocr import (
+    DEFAULT_MAX_BYTES as OCR_DEFAULT_MAX_BYTES,
+)
+from pcxa.commands.ocr import (
+    DEFAULT_PAGES_PER_HOUR as OCR_DEFAULT_PAGES_PER_HOUR,
+)
+from pcxa.commands.ocr import (
+    MAX_PAGES_PER_FILE as OCR_MAX_PAGES_PER_FILE,
+)
 from pcxa.commands.tags_folders import DELETION_TAG
 
 
@@ -356,7 +365,18 @@ def build_parser():
     p = files_sub.add_parser(
         "upload-chunks",
         help="Upload pre-computed chunks + embeddings for existing files "
-             "(bring-your-own-chunks; stops server-side chunking)",
+             "(bring-your-own-chunks; stops server-side chunking). If what you "
+             "have is OCR page text, use `files upload-ocr` instead.",
+        description=(
+            "Upload chunks you have already produced. The server stores them "
+            "verbatim and never re-derives them.\n\n"
+            "USE `files upload-ocr` INSTEAD if what you have is page text from a "
+            "scan. Sending OCR through this command succeeds — and silently "
+            "discards every bounding box and opts those files out of all future "
+            "chunker improvements, because the rows are marked "
+            "chunk_source=external and are never re-chunked. Nothing tells you "
+            "afterwards, so the choice has to be made here."
+        ),
     )
     p.add_argument("paths", nargs="+",
                    help="JSON-Lines file(s) or directory/ies of *.jsonl. One record "
@@ -399,6 +419,93 @@ def build_parser():
                    help="Validate and report batching without sending anything. Catches "
                         "dimension mismatches and partial-embedding files before they "
                         "cost a request.")
+    _add_http_timeout(p)
+
+    p = files_sub.add_parser(
+        "upload-ocr",
+        help="Upload OCR you produced (page text + bounding boxes) for existing "
+             "files; the server chunks and indexes it. If you already have "
+             "finished chunks, use `files upload-chunks` instead.",
+        description=(
+            "Send us OCR you produced yourself and we treat it as the file's "
+            "authoritative text: we chunk it, extract identifiers, index it and "
+            "embed it, exactly as we would text from our own OCR provider.\n\n"
+            "USE `files upload-chunks` INSTEAD if you have already chunked the "
+            "text yourself. The two are not interchangeable and both 'succeed', "
+            "so the difference has to be settled here: this command hands the "
+            "server text and keeps your geometry at full precision, and the "
+            "result stays re-derivable by future chunker improvements; "
+            "upload-chunks stores your chunks verbatim, has no field for "
+            "geometry, and marks the rows chunk_source=external forever.\n\n"
+            "START WITH --validate-only. It runs the server's dry run, writes "
+            "nothing, and reports both envelope shape errors and the "
+            "state-machine refusals (parked, already indexed, batch in "
+            "flight...) grouped by error_code. For a six-figure run that is the "
+            "difference between finding 8,000 unusable targets before scanning "
+            "and after.\n\n"
+            "ACCEPTANCE IS NOT SEARCHABILITY. A 202 means the text is durably "
+            "stored; chunking and embedding run afterwards on a background "
+            "queue. Read `pcxa files info <id>` for the index status."
+        ),
+    )
+    p.add_argument("paths", nargs="+",
+                   help="JSON-Lines file(s) or directory/ies of *.jsonl. One record "
+                        "per file: {\"file_id\": N, \"envelope\": {...}}, optionally "
+                        "with \"overwrite\", \"file_version_id\", \"provenance\". "
+                        "Streamed, so corpus-sized inputs are fine.")
+    p.add_argument("--manifest",
+                   help="Manifest from a prior `files sync`. Lets records address files "
+                        "by \"path\" or \"name\" instead of \"file_id\".")
+    p.add_argument("--state",
+                   help="JSON resume state. Applied file ids are recorded, so a re-run "
+                        "after an interruption skips them. Files refused for a transient "
+                        "reason are deliberately NOT recorded, so a re-run retries them.")
+    p.add_argument("--validate-only", dest="validate_only", action="store_true",
+                   help="Server-side dry run: writes nothing and reports both envelope "
+                        "shape errors and state refusals, grouped by error_code. Run "
+                        "this over the whole target list first. Exits 0 when the run "
+                        "completed — refusals are its output, not its failure — so "
+                        "`validate && upload` still works; only client-side rejections "
+                        "and transport failures make it non-zero.")
+    p.add_argument("--overwrite", action="store_true",
+                   help="Displace text a file already has (default off). A per-record "
+                        "\"overwrite\" key wins over this flag. Never overrides "
+                        "already_indexed or index_parked — those are refused regardless.")
+    p.add_argument("--files-per-request", dest="files_per_request", type=int, default=50,
+                   help="Files per request (default/server max: 50). The byte budget "
+                        "usually binds first.")
+    p.add_argument("--max-bytes", dest="max_bytes", type=int,
+                   default=OCR_DEFAULT_MAX_BYTES,
+                   help=f"Request body budget in bytes (default: "
+                        f"{OCR_DEFAULT_MAX_BYTES:,}; server cap 10 MB). Batches are "
+                        f"packed by bytes as well as file count, because the cap is a "
+                        f"413 raised before the body is parsed — nothing in the "
+                        f"response would say which file was responsible.")
+    p.add_argument("--pages-per-hour", dest="pages_per_hour", type=int,
+                   default=OCR_DEFAULT_PAGES_PER_HOUR,
+                   help=f"Client-side pacing (default: {OCR_DEFAULT_PAGES_PER_HOUR:,}). "
+                        f"The endpoint allows 120 requests/minute — its own throttle "
+                        f"scope, not upload-chunks' 30/min. Not a durability "
+                        f"constraint: raise it, or pass 0 to disable it. 429s are "
+                        f"retried honouring Retry-After either way.")
+    p.add_argument("--limit", type=int, default=0,
+                   help="Stop after queueing N files. Useful for graduated smoke tests. "
+                        "0 = no limit (default).")
+    p.add_argument("--max-failures", dest="max_failures", type=int, default=100,
+                   help="Abort once cumulative failures reach this (default: 100; 0 "
+                        "disables).")
+    p.add_argument("--error-log", dest="error_log",
+                   help="Append one JSON line per failure here (file_id, error_code, "
+                        "message, and any envelope shape errors), for live diagnosis.")
+    # Declared explicitly so `_propagate_dry_run_to_subparsers` leaves it alone.
+    # Without this the propagator adds an inert --dry-run, and a caller who types
+    # the flag every other command understands gets a real upload.
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="Alias for --validate-only. Unlike `upload-chunks --dry-run` "
+                        "this still makes a request: the dry run is server-side, "
+                        "which is what lets it report state refusals (parked, "
+                        "already indexed, batch in flight) that no client-side check "
+                        "can see. It still writes nothing.")
     _add_http_timeout(p)
 
     p = files_sub.add_parser(
@@ -574,6 +681,10 @@ def build_parser():
     p = act_sub.add_parser("create", help="Create activity")
     p.add_argument("--title", required=True)
     p.add_argument("--description")
+    p.add_argument("--outcome",
+                   help="What the activity concluded or produced. Companion to "
+                        "--description: description is the brief, outcome is the "
+                        "result. Not production/quantity (that is --percent).")
     p.add_argument("--status", choices=["not_started", "in_progress", "completed"])
     p.add_argument("--priority", type=int, choices=[0, 1, 2, 3, 4])
     p.add_argument("--due-date")
@@ -595,6 +706,10 @@ def build_parser():
     p.add_argument("activity_id", type=int)
     p.add_argument("--title")
     p.add_argument("--description")
+    p.add_argument("--outcome",
+                   help="What the activity concluded or produced. Pass an empty "
+                        'string (--outcome "") to clear it. Every revision is kept '
+                        "in the activity's history.")
     p.add_argument("--status", choices=["not_started", "in_progress", "completed"])
     p.add_argument("--priority", type=int, choices=[0, 1, 2, 3, 4])
     p.add_argument("--percent", type=int)
@@ -621,8 +736,23 @@ def build_parser():
     p.add_argument("--status")
     p.add_argument("--priority", type=int)
     p.add_argument("--owner", type=int)
-
+    # No --outcome here on purpose. ActivityBulkUpdateSerializer.validate_fields
+    # takes an explicit allow-list that does not include `outcome`, so the flag
+    # would parse locally and then 400 for every id. Adding it needs the server
+    # field added first — an outcome is also per-activity by definition, so one
+    # text applied across a selection is rarely what anyone means.
     act_sub.add_parser("types", help="List activity types")
+
+    p = act_sub.add_parser(
+        "related",
+        help="Related items linked to an activity (files, folders, photos, "
+             "form submissions, records) in either direction",
+    )
+    p.add_argument("activity_id", type=int)
+    p.add_argument("--types", help="Filter by neighbor type (comma-sep, e.g. file,folder)")
+    p.add_argument("--limit", type=int, help="Rows per page (server default if omitted)")
+    p.add_argument("--all", action="store_true", help="Follow cursors and fetch every page")
+    p.add_argument("--cursor", help="Resume from a cursor printed by a previous run")
 
     # ── steps ──
     steps_p = sub.add_parser("steps", help="Step (subtask) management")

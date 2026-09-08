@@ -196,6 +196,10 @@ server-side — so one slow call no longer aborts a multi-hour run.
 
 ### Loading a corpus with your own chunks and embeddings
 
+> **If what you have is OCR page text rather than finished chunks, use
+> `pcxa files upload-ocr` instead** — see the next section. Sending OCR through
+> `upload-chunks` succeeds, and silently discards your bounding boxes.
+
 If you run your own extraction/chunking/embedding pipeline, PCXA can serve your
 index instead of deriving its own. Files go up first, then chunks attach to them:
 
@@ -234,6 +238,52 @@ Three things worth knowing before a large load:
 
 Full details, including what the server guarantees afterwards, are in
 `skills/pcxa/SKILL.md` under "Bring your own chunks".
+
+### Loading a corpus with your own OCR
+
+If you scanned the documents yourself, send PCXA the **page text** and let it do
+the chunking — it preserves your bounding boxes at full precision and the result
+stays re-derivable by future chunker improvements:
+
+```bash
+pcxa files sync ./corpus --folder 42 --manifest .pcxa-sync.json          # 1. the files
+pcxa files upload-ocr ./ocr/ --manifest .pcxa-sync.json --validate-only  # 2. dry run FIRST
+pcxa files upload-ocr ./ocr/ --manifest .pcxa-sync.json \
+                             --state .pcxa-ocr.json                      # 3. the load
+```
+
+Input is JSON-Lines, one record per file, streamed. The `envelope` is one of
+exactly two shapes — `pcxa.ocr_layout.v1` (text with 0–1 normalized geometry) or
+`pcxa.text.v1` (text alone, fully supported and better than fabricated boxes):
+
+```json
+{"file_id": 123, "envelope": {"schema": "pcxa.text.v1",
+                              "provenance": {"producer": "mxi-scanner/1.4"},
+                              "pages": [{"n": 1, "text": "..."}]}}
+```
+
+Four things worth knowing before a large load:
+
+- **`--validate-only` is the first step, not a nicety.** The dry run is
+  server-side, so it reports envelope shape errors *and* state refusals a client
+  cannot see — parked, already indexed, batch in flight — grouped by
+  `error_code`. On a six-figure corpus that is the difference between finding
+  8,000 unusable targets before scanning and after. It exits 0 when the run
+  completed, because refusals are its output rather than its failure.
+- **`202` does not mean searchable.** It means the text is durably stored;
+  chunking and embedding run afterwards on a background queue. Read
+  `pcxa files info <id>` for the index status — this command's exit is not it.
+- **Most refusals are not retryable** (`index_parked`, `already_indexed`,
+  `not_found`, …) and are reported and skipped. `index_parked` is a deliberate
+  exclusion someone chose, not an error. The two transient ones
+  (`ocr_batch_in_flight`, `chunking_in_progress`) are left out of `--state` so a
+  re-run retries exactly those.
+- **Batching packs by bytes as well as file count.** The 10 MB body cap is a
+  `413` raised before the body is parsed, so nothing in the response would name
+  the file at fault; `--max-bytes` defaults to 9 MB. Retries need no idempotency
+  key — dedup is content-addressed server-side.
+
+Full details are in `skills/pcxa/SKILL.md` under "Bring your own OCR".
 
 ## License
 
