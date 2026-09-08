@@ -658,6 +658,10 @@ def build_parser():
     p.add_argument("--type", help="Activity type ID")
     p.add_argument("--parent", type=int)
     p.add_argument("--root-only", action="store_true")
+    p.add_argument("--wbs", help="Exact WBS path, e.g. 1.4.2")
+    p.add_argument("--wbs-branch", dest="wbs_branch",
+                   help="A WBS node and its whole subtree, e.g. 1.4 (includes 1.4.1, "
+                        "1.4.2.7, ... but not 1.40)")
     p.add_argument("--search", "-s",
                    help="Search title/description/wbs_code (fuzzy by default; exact matches rank first)")
     p.add_argument("--exact", action="store_true",

@@ -77,6 +77,68 @@ def _activity_row(a):
     }
 
 
+def _wbs_matches(code, exact, branch):
+    """Does one row's ``wbs_code`` satisfy the requested WBS constraint?"""
+    code = code or ""
+    if exact and code != exact:
+        return False
+    # The trailing dot mirrors the server filter: 1.40 is not under 1.4.
+    if branch and not (code == branch or code.startswith(f"{branch}.")):
+        return False
+    return True
+
+
+def _check_wbs_rows(args, results):
+    """Abort if the server returned rows outside the requested WBS scope.
+
+    django-filter **silently ignores query params it does not recognise**. An
+    API that predates ``wbs_code``/``wbs_branch`` therefore answers
+    ``?wbs_branch=1.4`` with the entire project and a 200 — a confident wrong
+    answer, which is worse than an error and impossible to spot from the shape
+    of the response.
+
+    So the filter is verified rather than trusted: every returned row must
+    satisfy the constraint locally. This costs one comparison per row and
+    turns a silent superset into a loud failure naming the cause.
+    """
+    exact = getattr(args, "wbs", None)
+    branch = getattr(args, "wbs_branch", None)
+    if not exact and not branch:
+        return
+    if not isinstance(results, list):
+        return
+    for a in results:
+        if not isinstance(a, dict):
+            continue
+        if not _wbs_matches(a.get("wbs_code"), exact, branch):
+            requested = f"--wbs {exact}" if exact else f"--wbs-branch {branch}"
+            print(
+                f"Server ignored {requested}: it returned activity {a.get('id')} with "
+                f"wbs_code={a.get('wbs_code')!r}, which is outside that scope.\n"
+                "This API does not support WBS filtering yet, so the unfiltered "
+                "project would have been reported as the filtered result. "
+                "Refusing to print it.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+def _assert_wbs_filter_applied(client, args, params):
+    """Probe one row before trusting a count built from a WBS filter."""
+    if not (getattr(args, "wbs", None) or getattr(args, "wbs_branch", None)):
+        return
+    probe = dict(params)
+    probe["page_size"] = 1
+    probe.pop("limit", None)
+    probe.pop("offset", None)
+    try:
+        data = client.get("activities/", probe)
+    except Exception:
+        return  # a failed probe is the caller's problem on the real request
+    results = data.get("results", data) if isinstance(data, dict) else data
+    _check_wbs_rows(args, results)
+
+
 def cmd_activities_list(client, args):
     """List activities."""
     params = client.paginate_params(args.limit, args.offset)
@@ -109,6 +171,10 @@ def cmd_activities_list(client, args):
         params["parent"] = args.parent
     if args.root_only:
         params["parent__isnull"] = "true"
+    if getattr(args, "wbs", None):
+        params["wbs_code"] = args.wbs
+    if getattr(args, "wbs_branch", None):
+        params["wbs_branch"] = args.wbs_branch
     if args.search:
         params["search"] = args.search
         # Default to fuzzy: exact substring matches surface first, then
@@ -136,18 +202,31 @@ def cmd_activities_list(client, args):
         params["ordering"] = sort
 
     if args.count_only:
+        # Verify before reporting: a count computed from an ignored filter is
+        # the whole project stated as a subtree total, with nothing on screen
+        # to contradict it.
+        _assert_wbs_filter_applied(client, args, params)
         print(json.dumps({"count": client.get_count("activities/", params)}))
         return
 
     data = client.get("activities/", params)
+    results = data.get("results", data) if isinstance(data, dict) else data
+    _check_wbs_rows(args, results)
     if args.format == "json":
         out_json(data)
         return
-    results = data.get("results", data) if isinstance(data, dict) else data
     total = data.get("count", len(results)) if isinstance(data, dict) else len(results)
     rows = [_activity_row(a) for a in results]
+    if getattr(args, "wbs", None) or getattr(args, "wbs_branch", None):
+        # Only when a WBS filter is on: the column is the thing being filtered,
+        # so showing it lets the caller confirm the result rather than trust it.
+        for row, a in zip(rows, results):
+            row["wbs"] = str(a.get("wbs_code") or "")
+        cols = ["id", "wbs", "title", "status", "pct", "priority", "owner", "due"]
+    else:
+        cols = ["id", "title", "status", "pct", "priority", "owner", "due"]
     print(f"Activities: {len(rows)} of {total}\n")
-    out_table(rows, ["id", "title", "status", "pct", "priority", "owner", "due"])
+    out_table(rows, cols)
 
 
 def cmd_activities_get(client, args):

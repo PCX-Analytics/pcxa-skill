@@ -525,6 +525,9 @@ pcxa activities list --after 2026-03-01 --before 2026-03-31       # updated in d
 pcxa activities list --after last_month                          # relative dates supported
 pcxa activities list --created-after 2026-01-01 --created-before 2026-03-31
 pcxa activities list --assignee 5 --after 2026-03-01 --before 2026-03-31  # user's work in period
+pcxa activities list --wbs 1.4.2                              # exact WBS path
+pcxa activities list --wbs-branch 1.4                         # 1.4 and everything under it
+pcxa activities list --wbs-branch 1.4 --status completed      # composes with any other filter
 pcxa activities get 123                                       # detail + steps + deps
 pcxa activities create --title "Review" --priority 3 --type 5 --assignees 1,2
 pcxa activities create --title "Pour slab" --custom-fields '{"3":"Acme Corp"}'  # custom-object value, fuzzy-validated
@@ -551,9 +554,13 @@ Do NOT put in descriptions: processing details, scripts, output file lists, stat
 
 Every edit is kept in the activity's history, so revising an outcome loses nothing. `--outcome ""` clears it.
 
-Two limits worth knowing before you plan around them:
-- **`bulk-update` has no `--outcome`.** The server's bulk allow-list rejects the field, and an outcome is per-activity by definition. Update them one at a time.
+Two limits worth knowing before you plan around them. Both are lifted by PCX-Analytics/pcxa#2863, so check whether that has deployed before designing around them:
+- **`bulk-update` has no `--outcome`.** The server's bulk allow-list rejects the field. Update them one at a time.
 - **`activities list --search` does not read outcomes.** Server-side search covers title, description and WBS code only. The outcome *is* indexed for semantic search, so `pcxa chat send` can find it when `--search` cannot.
+
+**WBS filters:** `--wbs 1.4.2` matches that one activity exactly. `--wbs-branch 1.4` returns 1.4 plus its whole subtree — 1.4.1, 1.4.2.7, at any depth — but **not** 1.40 or 1.41, which merely share a digit prefix. Both are server-side and compose with every other filter, and a `wbs` column is added to the table so you can confirm the scope rather than trust it.
+
+Requires an API with the WBS filters (PCX-Analytics/pcxa#2863). Against an older API the CLI **aborts rather than printing**: django-filter silently ignores parameters it does not know, so an unpatched server answers `--wbs-branch 1.4` with the entire project and a 200. The CLI re-checks every returned row and refuses a result it can prove is out of scope — you get a loud error, never a project-wide list mislabelled as a branch.
 
 **Date filters:** `--after`/`--before` filter by last updated; `--created-after`/`--created-before` filter by creation date. Accepts `YYYY-MM-DD` or relative keywords: `today`, `last_7_days`, `this_month`, `last_quarter`, etc.
 
