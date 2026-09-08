@@ -261,6 +261,43 @@ def resolve_ids(client):
         sys.exit(1)
 
 
+# Object types the links graph accepts, mirroring the server's
+# ``generic_link.utils.CONTENT_TYPE_MAP``. Held as a literal rather than
+# fetched from ``/api/content-types/`` so a typo fails locally and instantly
+# instead of costing a round-trip and returning an opaque 400. The cost of the
+# copy is that a type added server-side needs a CLI release before the CLI will
+# pass it through; the error names the whole set, so that mismatch reads as a
+# stale CLI rather than a mystery.
+LINK_OBJECT_TYPES = (
+    "activity",
+    "file",
+    "folder",
+    "photo",
+    "drawing",
+    "source_document",
+    "markup",
+    "project",
+    "company",
+    "formsubmission",
+    "fieldchoiceoption",
+)
+
+# Node types whose far end the ``neighbors`` endpoint can resolve, mirroring
+# ``generic_link.neighbors.NEIGHBOR_TYPES``. Deliberately NARROWER than
+# LINK_OBJECT_TYPES: a link to a drawing is creatable, but neighbors cannot
+# hydrate it and reports it under ``meta.omitted_types`` instead of dropping it
+# silently. ``activities related`` prints that line for the same reason — a cap
+# on coverage the caller cannot see is worse than one they can.
+NEIGHBOR_OBJECT_TYPES = (
+    "activity",
+    "file",
+    "folder",
+    "photo",
+    "formsubmission",
+    "fieldchoiceoption",
+)
+
+
 def parse_object_ref(ref):
     """Parse 'type:id' reference into (type_string, object_id).
 
@@ -271,15 +308,33 @@ def parse_object_ref(ref):
         print(f"Invalid object reference '{ref}'. Use format type:id (e.g. file:123, activity:456)", file=sys.stderr)
         sys.exit(1)
     obj_type, obj_id = parts
+    obj_type = obj_type.strip()
     try:
-        return obj_type.strip(), int(obj_id.strip())
+        obj_id = int(obj_id.strip())
     except ValueError:
         print(f"Invalid ID in reference '{ref}'. ID must be an integer.", file=sys.stderr)
         sys.exit(1)
+    if obj_type not in LINK_OBJECT_TYPES:
+        close = difflib.get_close_matches(obj_type, LINK_OBJECT_TYPES, n=1, cutoff=0.6)
+        hint = f" Did you mean '{close[0]}'?" if close else ""
+        print(
+            f"Invalid object type '{obj_type}' in reference '{ref}'.{hint}\n"
+            f"Valid types: {', '.join(LINK_OBJECT_TYPES)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return obj_type, obj_id
 
 
 def links_url(client, path=""):
-    """Build URL for generic-links endpoint (top-level, not project-scoped)."""
+    """Build URL for generic-links endpoint (top-level, not project-scoped).
+
+    This flat route is where ``CompanyProjectsPermissions`` has no
+    company_pk/project_pk to check and degrades to IsAuthenticated. Prefer
+    ``client._url("generic-links/...")`` for anything new — the nested route
+    is where the company and project gates actually fire, and it is the only
+    place the ``neighbors`` and ``labels`` actions are registered.
+    """
     return f"{client.base_url}/api/generic-links/{path}"
 
 
@@ -292,4 +347,6 @@ __all__ = [
     "resolve_ids",
     "parse_object_ref",
     "links_url",
+    "LINK_OBJECT_TYPES",
+    "NEIGHBOR_OBJECT_TYPES",
 ]

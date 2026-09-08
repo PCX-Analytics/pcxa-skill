@@ -7,7 +7,16 @@ from pathlib import Path
 
 from pcxa._http import requests
 from pcxa._output import out_json, out_table, tag_names
-from pcxa._resolve import resolve_member_by_name, validate_choice_field_values
+from pcxa._resolve import (
+    NEIGHBOR_OBJECT_TYPES,
+    resolve_member_by_name,
+    validate_choice_field_values,
+)
+
+# Safety cap when following ``--all`` cursors, mirroring
+# ``APIClient.get_all_pages``: a runaway neighbourhood should stop, loudly,
+# rather than page forever.
+MAX_NEIGHBOR_PAGES = 50
 
 PRIORITY_MAP = {0: "-", 1: "Low", 2: "Med", 3: "High", 4: "Critical"}
 
@@ -160,6 +169,8 @@ def cmd_activities_get(client, args):
     print(f"  Actual:    {acs} -> {acf}")
     if data.get("description"):
         print(f"  Desc:      {data['description'][:200]}")
+    if data.get("outcome"):
+        print(f"  Outcome:   {data['outcome'][:200]}")
     if data.get("wbs_code"):
         print(f"  WBS:       {data['wbs_code']}")
     tags = data.get("tags") or []
@@ -189,6 +200,8 @@ def cmd_activities_create(client, args):
     payload = {"title": args.title, "project": client.project_id}
     if args.description:
         payload["description"] = args.description
+    if args.outcome:
+        payload["outcome"] = args.outcome
     if args.status:
         payload["status"] = args.status
     if args.priority is not None:
@@ -233,6 +246,12 @@ def cmd_activities_update(client, args):
         payload["title"] = args.title
     if args.description is not None:
         payload["description"] = args.description
+    # ``is not None``, matching description above: an activity's outcome is
+    # revisable, so ``--outcome ""`` has to be able to clear one. A truthiness
+    # guard would silently drop the empty string and make a wrong outcome
+    # permanent.
+    if args.outcome is not None:
+        payload["outcome"] = args.outcome
     if args.status:
         payload["status"] = args.status
     if args.priority is not None:
@@ -336,6 +355,110 @@ def cmd_activities_types(client, args):
         })
     print(f"Activity types: {len(rows)}\n")
     out_table(rows, ["id", "name", "category", "steps", "default"])
+
+
+def _neighbor_row(item):
+    """Flatten one neighbors row into table columns."""
+    n = item.get("neighbor") or {}
+    # "outgoing" means the activity is the link's source. Rendered as an arrow
+    # because which end the anchor sits on is the only thing direction says,
+    # and "out"/"in" reads as a property of the neighbor instead.
+    arrow = "->" if item.get("direction") == "outgoing" else "<-"
+    return {
+        "link": str(item.get("link_id", "")),
+        "dir": arrow,
+        "type": str(item.get("neighbor_type") or n.get("type") or "?"),
+        "id": str(n.get("id", "")),
+        "name": str(n.get("name") or n.get("full_path") or "")[:45],
+        "label": str(item.get("description") or "")[:35],
+    }
+
+
+def cmd_activities_related(client, args):
+    """Related items linked to an activity, in either direction.
+
+    Reads ``generic-links/neighbors/`` on the PROJECT-NESTED route. Three
+    reasons that endpoint rather than two ``links list`` calls:
+
+    * It resolves the far end of every edge, so one request answers "what is
+      attached to this activity" instead of a list of ids to go look up.
+    * Links point either way, so the flat endpoint needs one call for
+      ``source=activity:N`` and another for ``target=activity:N`` plus a
+      client-side merge. Neighbors is anchored, not directional.
+    * ``CompanyProjectsPermissions`` only fires where company_pk/project_pk
+      are in the path. On the flat ``/api/generic-links/`` route it degrades
+      to IsAuthenticated (see ``_resolve.links_url``).
+    """
+    if args.types:
+        wanted = [t.strip() for t in args.types.split(",") if t.strip()]
+        unknown = [t for t in wanted if t not in NEIGHBOR_OBJECT_TYPES]
+        if unknown:
+            print(
+                f"Unsupported neighbor type(s): {', '.join(unknown)}\n"
+                f"Valid types: {', '.join(NEIGHBOR_OBJECT_TYPES)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        wanted = None
+
+    params = {"type": "activity", "id": args.activity_id}
+    if wanted:
+        params["neighbor_type"] = ",".join(wanted)
+    if args.limit:
+        params["page_size"] = args.limit
+    if args.cursor:
+        params["cursor"] = args.cursor
+
+    results, omitted, truncated, pages = [], set(), False, 0
+    next_cursor = None
+    while True:
+        data = client.get("generic-links/neighbors/", params=params)
+        results.extend(data.get("results") or [])
+        meta = data.get("meta") or {}
+        omitted.update(meta.get("omitted_types") or [])
+        truncated = truncated or bool(meta.get("truncated_scan"))
+        next_cursor = data.get("next_cursor")
+        pages += 1
+        if not args.all or not next_cursor or pages >= MAX_NEIGHBOR_PAGES:
+            break
+        params["cursor"] = next_cursor
+
+    if args.format == "json":
+        out_json({
+            "results": results,
+            "next_cursor": next_cursor,
+            "meta": {
+                "pages_fetched": pages,
+                "omitted_types": sorted(omitted),
+                "truncated_scan": truncated,
+            },
+        })
+        return
+
+    rows = [_neighbor_row(item) for item in results]
+    print(f"Related items for activity {args.activity_id}: {len(rows)}\n")
+    out_table(rows, ["link", "dir", "type", "id", "name", "label"])
+
+    # Everything below is coverage reporting. The endpoint declines to count
+    # the neighbourhood (an exact count means enumerating and
+    # permission-filtering all of it), so "N shown" is never "N exist" — say
+    # so rather than letting the table imply completeness.
+    if omitted:
+        print(
+            f"\nNote: {', '.join(sorted(omitted))} link(s) exist on this activity but "
+            "cannot be resolved by this endpoint and are NOT listed above.",
+            file=sys.stderr,
+        )
+    if truncated:
+        print("\nNote: the server stopped scanning on its own budget — more links may exist.",
+              file=sys.stderr)
+    if next_cursor:
+        if args.all and pages >= MAX_NEIGHBOR_PAGES:
+            print(f"\nStopped after {pages} pages (safety cap). Resume with --cursor {next_cursor}",
+                  file=sys.stderr)
+        elif not args.all:
+            print(f"\nMore results. Use --all, or --cursor {next_cursor}", file=sys.stderr)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

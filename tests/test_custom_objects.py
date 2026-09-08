@@ -358,10 +358,10 @@ def test_activity_validation_skipped_with_no_fuzzy():
 def test_activity_create_puts_custom_fields_under_key(capsys):
     c = RecClient()
     args = SimpleNamespace(
-        dry_run=True, format="json", title="T", description=None, status=None,
-        priority=None, due_date=None, planned_start=None, planned_finish=None,
-        owner=None, assignees=None, type=None, parent=None, tags=None, wbs=None,
-        custom_fields='{"3":"Acme Corp"}', no_fuzzy=False,
+        dry_run=True, format="json", title="T", description=None, outcome=None,
+        status=None, priority=None, due_date=None, planned_start=None,
+        planned_finish=None, owner=None, assignees=None, type=None, parent=None,
+        tags=None, wbs=None, custom_fields='{"3":"Acme Corp"}', no_fuzzy=False,
     )
     cmd_activities_create(c, args)
     out = capsys.readouterr().out
