@@ -444,6 +444,11 @@ def cmd_activities_related(client, args):
     # the neighbourhood (an exact count means enumerating and
     # permission-filtering all of it), so "N shown" is never "N exist" — say
     # so rather than letting the table imply completeness.
+    #
+    # Flush first: stdout is block-buffered when piped while stderr is not, so
+    # without this the caveats surface ABOVE the table they qualify in any
+    # combined capture — which is exactly how an agent reads this command.
+    sys.stdout.flush()
     if omitted:
         print(
             f"\nNote: {', '.join(sorted(omitted))} link(s) exist on this activity but "
