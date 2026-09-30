@@ -67,6 +67,58 @@ MANIFEST_CHECKPOINT_FILES = 50
 R2_MAX_PARTS = 10000
 R2_PART_HEADROOM = 9500  # leave room so we never round up to 10001
 
+# Exit status of `files sync` (#25, PCX-Analytics/pcxa#1450 AC 4). A script
+# driving a multi-hour sync can only trust the run if the exit status says
+# whether every file landed. 1 (input/startup) and 2 (fatal/auth) are the
+# codes the command already used.
+EXIT_OK = 0
+EXIT_PARTIAL = 3      # some files errored, were unrecognized or not attempted
+EXIT_ABORTED = 4      # stopped early: --max-failures budget exhausted
+
+
+class _NotAttempted(RuntimeError):
+    """An upload that never started because the run was already stopping.
+
+    Counted as ``not_attempted``, never as ``error``: nothing failed, the file
+    simply was not tried, and booking it as a failure made an aborted run look
+    like it had hit far more errors than it had.
+    """
+
+
+# bulk-register row statuses that mean "this file is in the database".
+_REGISTERED_STATUSES = frozenset({"created", "duplicate"})
+
+
+def _committed_before_connection_loss(resp_obj):
+    """The body of the server's connection-lost 503, or None for any other error.
+
+    Only a response that says ``"aborted": "connection_lost"`` and carries a
+    ``results`` list is trusted: that is the contract the server keeps for a
+    batch whose connection died after some rows committed. Anything else --
+    a plain 5xx, an HTML error page, a malformed body -- says nothing about
+    which rows landed, so the whole batch stays failed.
+    """
+    if resp_obj is None or getattr(resp_obj, "status_code", None) != 503:
+        return None
+    try:
+        data = resp_obj.json()
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("aborted") != "connection_lost":
+        return None
+    if not isinstance(data.get("results"), list):
+        return None
+    return data
+
+
+def _sync_exit_code(summary):
+    """The exit status for a finished run, most severe reason first."""
+    if summary.get("aborted_max_failures"):
+        return EXIT_ABORTED
+    if summary["error"] or summary["unrecognized"] or summary["not_attempted"]:
+        return EXIT_PARTIAL
+    return EXIT_OK
+
 
 def cmd_files_sync(client, args):
     input_root = Path(args.input_dir).resolve()
@@ -296,6 +348,16 @@ def cmd_files_sync(client, args):
         # (pcxa#1699 / #1730).
         "failure_events": 0,
         "failures": [],
+        # Rows the server answered with a status the CLI does not know. Not a
+        # success, so never written to the manifest (#25).
+        "unrecognized": 0,
+        # Files the run never reached because it stopped early (budget abort
+        # or Ctrl-C). Counted from the work items themselves, so
+        #   created + duplicate + error + unrecognized + not_attempted == to_upload
+        # holds on every path that prints a summary (#25) -- except a
+        # bulk-register still in flight when the 10 s flush-worker wait below
+        # gives up, which is #27.
+        "not_attempted": 0,
         "aborted_max_failures": False,
         "concurrency_final": initial_concurrency,
     }
@@ -307,7 +369,7 @@ def cmd_files_sync(client, args):
             out_json(summary)
         else:
             print("Nothing to upload.", file=sys.stderr)
-        return
+        return EXIT_OK
 
     _run_uploads(
         client=client,
@@ -342,8 +404,10 @@ def cmd_files_sync(client, args):
         print(
             f"\nDone: {summary['created']} created, "
             f"{summary['duplicate']} duplicate, "
-            f"{summary['error']} error  "
-            f"(skipped: {skipped_manifest} manifest, {skipped_api} name match)  "
+            f"{summary['error']} error"
+            + (f", {summary['unrecognized']} unrecognized" if summary["unrecognized"] else "")
+            + (f", {summary['not_attempted']} not attempted" if summary["not_attempted"] else "")
+            + f"  (skipped: {skipped_manifest} manifest, {skipped_api} name match)  "
             f"final concurrency: {summary['concurrency_final']}",
             file=sys.stderr,
         )
@@ -357,6 +421,8 @@ def cmd_files_sync(client, args):
             print(f"\nFirst {min(10, len(summary['failures']))} failures:", file=sys.stderr)
             for f in summary["failures"][:10]:
                 print(f"  - {f['name']}: {f['error']}", file=sys.stderr)
+
+    return _sync_exit_code(summary)
 
 
 def _collect_files(input_root, includes, excludes, skip_hidden):
@@ -1017,6 +1083,17 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     }
     interrupted = threading.Event()
     fatal_error: list[BaseException] = []  # at most one element; written by bg thread
+    # Work items that reached an outcome in this run: handed to bulk-register
+    # (which books created/duplicate/error/unrecognized), failed before it, or
+    # not started. Whatever is NOT in here when the run ends was never reached
+    # -- still queued or never presigned -- and is counted as not_attempted
+    # from the items themselves, not derived from the other counters (#25).
+    accounted = set()
+    accounted_lock = threading.Lock()
+
+    def _account(entry):
+        with accounted_lock:
+            accounted.add(id(entry))
     slots = AdjustableSemaphore(
         initial=initial_concurrency,
         minimum=min_concurrency,
@@ -1086,9 +1163,21 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                         and attempt < BULK_REGISTER_RETRIES - 1:
                     time.sleep(2 ** attempt)
                     continue
+                failed = items
+                committed = _committed_before_connection_loss(resp_obj)
+                if committed is not None:
+                    # The server lost its DB connection mid-batch
+                    # (PCX-Analytics/pcxa#1730): the rows it lists ARE in the
+                    # database. Booking the whole batch as failed contradicted
+                    # the database and left those rows out of the manifest, so
+                    # only the rest of the batch is a failure (#25).
+                    covered = _apply_register_response(committed, items)
+                    failed = [it for i, it in enumerate(items) if i not in covered]
+                if not failed:
+                    return
                 _record_batch_failure(
                     summary,
-                    items,
+                    failed,
                     f"bulk-register: {exc}" + (f" detail={detail}" if detail else ""),
                 )
                 _log_error(
@@ -1103,53 +1192,73 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
         if resp is None:
             return
         try:
-            data = resp.json()
-            s = data.get("summary", {})
-            summary["created"] += s.get("created", 0)
-            summary["duplicate"] += s.get("duplicate", 0)
-            # Genuine per-row rejections (bad storage key, junk filename...).
-            # These ARE independent failures, so each one is its own event.
-            summary["error"] += s.get("error", 0)
-            summary["failure_events"] += s.get("error", 0)
-            results = data.get("results") or []
-            for row in results:
-                idx = row.get("index")
-                if idx is None or idx >= len(items):
-                    continue
-                item = items[idx]
-                rel_path = item.get("_sync_rel_path")
-                if row.get("status") == "error":
-                    summary["failures"].append({
-                        "name": item.get("original_filename", "?"),
-                        "error": row.get("error", "unknown"),
-                    })
-                    _log_error(
-                        phase="bulk_register_row",
-                        name=item.get("original_filename", "?"),
-                        error=row.get("error", "unknown"),
-                        storage_key=item.get("storage_key"),
-                    )
-                    continue
-                if not rel_path:
-                    continue
-                with manifest_lock:
-                    # Backend's bulk-register response shape is
-                    # ``{"status": "created", "id": <pk>, ...}`` — the
-                    # field is ``id``, not ``file_id``. The original
-                    # read silently wrote ``file_id: null`` into every
-                    # manifest entry across the entire upload campaign;
-                    # fall back through ``id`` first and accept
-                    # ``file_id`` for forward-compat if the backend ever
-                    # renames.
-                    manifest["files"][rel_path] = {
-                        "size": item.get("file_size"),
-                        "name": item.get("original_filename"),
-                        "folder_id": item.get("folder"),
-                        "file_id": row.get("id") or row.get("file_id"),
-                        "uploaded_at": datetime.now(timezone.utc).isoformat(),
-                    }
+            _apply_register_response(resp.json(), items)
         except Exception as exc:
             _record_batch_failure(summary, items, f"bulk-register: {exc}")
+
+    def _apply_register_response(data, items):
+        """Book one bulk-register response. Returns the item indices it covered.
+
+        Shared by a normal 200 and by the server's connection-lost 503, whose
+        body reports the rows committed before the drop in the same shape.
+        """
+        s = data.get("summary", {})
+        summary["created"] += s.get("created", 0)
+        summary["duplicate"] += s.get("duplicate", 0)
+        # Genuine per-row rejections (bad storage key, junk filename...).
+        # These ARE independent failures, so each one is its own event.
+        summary["error"] += s.get("error", 0)
+        summary["failure_events"] += s.get("error", 0)
+        summary["unrecognized"] += s.get("unrecognized", 0)
+        covered = set()
+        results = data.get("results") or []
+        for row in results:
+            idx = row.get("index")
+            if idx is None or idx >= len(items):
+                continue
+            covered.add(idx)
+            item = items[idx]
+            rel_path = item.get("_sync_rel_path")
+            row_status = row.get("status")
+            if row_status == "error":
+                summary["failures"].append({
+                    "name": item.get("original_filename", "?"),
+                    "error": row.get("error", "unknown"),
+                })
+                _log_error(
+                    phase="bulk_register_row",
+                    name=item.get("original_filename", "?"),
+                    error=row.get("error", "unknown"),
+                    storage_key=item.get("storage_key"),
+                )
+            elif row_status not in _REGISTERED_STATUSES:
+                summary["failures"].append({
+                    "name": item.get("original_filename", "?"),
+                    "error": f"unrecognized bulk-register status {row_status!r}",
+                })
+            # The one gate in front of the manifest: only a row the server
+            # confirms is registered may be recorded as done. A failed or
+            # unrecognized row in the manifest is skipped by every later
+            # --trust-manifest run, i.e. never retried (#25).
+            if row_status not in _REGISTERED_STATUSES or not rel_path:
+                continue
+            with manifest_lock:
+                # Backend's bulk-register response shape is
+                # ``{"status": "created", "id": <pk>, ...}`` — the
+                # field is ``id``, not ``file_id``. The original
+                # read silently wrote ``file_id: null`` into every
+                # manifest entry across the entire upload campaign;
+                # fall back through ``id`` first and accept
+                # ``file_id`` for forward-compat if the backend ever
+                # renames.
+                manifest["files"][rel_path] = {
+                    "size": item.get("file_size"),
+                    "name": item.get("original_filename"),
+                    "folder_id": item.get("folder"),
+                    "file_id": row.get("id") or row.get("file_id"),
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                }
+        return covered
 
     def _maybe_flush():
         with pending_lock:
@@ -1213,22 +1322,22 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
 
     def _gated_upload(entry):
         if interrupted.is_set():
-            raise RuntimeError("interrupted")
+            raise _NotAttempted("interrupted")
         slots.acquire()
         try:
             if interrupted.is_set():
-                raise RuntimeError("interrupted")
+                raise _NotAttempted("interrupted")
             return _upload_one(entry)
         finally:
             slots.release()
 
     def _gated_upload_presigned(entry, upload_url, storage_key):
         if interrupted.is_set():
-            raise RuntimeError("interrupted")
+            raise _NotAttempted("interrupted")
         slots.acquire()
         try:
             if interrupted.is_set():
-                raise RuntimeError("interrupted")
+                raise _NotAttempted("interrupted")
             return _upload_one_presigned(entry, upload_url, storage_key)
         finally:
             slots.release()
@@ -1470,6 +1579,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     feeder_thread.start()
 
     def _handle_completion(future, entry):
+        _account(entry)
         try:
             item = future.result()
             item["_sync_rel_path"] = entry["relative_path"]
@@ -1481,6 +1591,11 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                 state["files_done"] += 1
                 state["bytes_done"] += entry["size"]
                 state["since_manifest_save"] += 1
+        except _NotAttempted:
+            # Queued behind the workers when the run started stopping. Nothing
+            # was tried, so nothing failed.
+            summary["not_attempted"] += 1
+            return
         except Exception as exc:
             summary["error"] += 1
             summary["failure_events"] += 1  # one file, one event
@@ -1554,6 +1669,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                     if url_or_marker is _PRESIGN_ERR:
                         # Per-item bulk-presign failure — surface
                         # immediately, no pool submit.
+                        _account(entry)
                         summary["error"] += 1
                         summary["failure_events"] += 1  # one file, one event
                         summary["failures"].append({
@@ -1630,6 +1746,8 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
 
     # Final drain — chunked so we never exceed the server's 200-item cap.
     _drain_pending_in_chunks()
+    with accounted_lock:
+        summary["not_attempted"] += sum(1 for e in work_items if id(e) not in accounted)
     if manifest_path:
         _save_manifest(manifest_path, manifest, input_root, root_folder_id)
     summary["concurrency_final"] = slots.target
