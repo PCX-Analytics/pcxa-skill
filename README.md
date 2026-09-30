@@ -194,6 +194,36 @@ export PCXA_HTTP_TIMEOUT=300
 adopts an existing folder when a timed-out create turns out to have landed
 server-side — so one slow call no longer aborts a multi-hour run.
 
+### Can a script trust `files sync`?
+
+Yes — from 0.8.0 the exit status says whether every file landed:
+
+| Exit | Meaning |
+|---|---|
+| 0 | every file queued for upload is registered (created or duplicate) |
+| 1 | bad input or startup failure (path, target folder, folder resolution) |
+| 2 | fatal: authentication expired |
+| 3 | partial: some files errored, were unrecognized by the server, or were not attempted (including a Ctrl-C'd run) |
+| 4 | aborted: `--max-failures` budget exhausted |
+
+**Before 0.8.0 a sync with failed files exited 0.** A script that only checks
+for non-zero now sees partial runs as failures, which is the point.
+
+The summary (`--format json`) adds up:
+`created + duplicate + error + unrecognized + not_attempted == to_upload`.
+`not_attempted` is what an abort or Ctrl-C never reached; re-running the same
+command with the same `--manifest` picks those files up. One known exception:
+a bulk-register still in flight when the run finishes, if it takes longer than
+the 10 s the CLI waits for it, lands on the server after the summary is
+printed ([#27](https://github.com/PCX-Analytics/pcxa-skill/issues/27)).
+
+**What `--trust-manifest` gives up.** Only rows the server confirmed
+(`created` / `duplicate`) are written to the manifest, so a file that failed
+is retried on the next run with or without the flag. What the flag skips is the
+server-side name check: a file recorded in the manifest and later deleted on
+the server is never uploaded again, and nothing in the run will tell you.
+Drop the flag (or the manifest) when the target folder may have changed.
+
 ### Loading a corpus with your own chunks and embeddings
 
 > **If what you have is OCR page text rather than finished chunks, use
