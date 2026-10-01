@@ -10,9 +10,9 @@
 # on a fully-released version is a no-op that prints "already done."
 #
 # Phases:
-#   1. Bump version in the 4 source-of-truth files (skip if all 5
-#      version sites already equal the target — marketplace.json has
-#      two).
+#   1. Bump the five publication-version sites in the four source files. The
+#      marketplace metadata version is schema metadata and is not a release
+#      version. The shared validator also confirms the named `pcxa` plugin.
 #   2. Commit the bumps (skip if HEAD already is the release commit).
 #   3. Create the annotated tag locally (skip if tag exists at HEAD;
 #      hard-error if it exists but points elsewhere).
@@ -43,22 +43,10 @@ cd "$REPO_ROOT"
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
-# Read the current version recorded in each of the 5 sites.
-read_versions() {
-  PYPROJ_VER="$(grep -E '^version = ' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-  INIT_VER="$(grep -E '^__version__' pcxa/__init__.py | sed -E 's/.*"([^"]+)".*/\1/')"
-  PLUGIN_VER="$(jq -r '.version' .claude-plugin/plugin.json)"
-  MARKET_TOP_VER="$(jq -r '.version' .claude-plugin/marketplace.json)"
-  MARKET_PLUG_VER="$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)"
-}
-
+# The validator owns publication-version and tag semantics. In particular,
+# marketplace.metadata.version is intentionally not compared to releases.
 all_versions_match_target() {
-  read_versions
-  [ "$PYPROJ_VER" = "$VERSION" ] \
-    && [ "$INIT_VER" = "$VERSION" ] \
-    && [ "$PLUGIN_VER" = "$VERSION" ] \
-    && [ "$MARKET_TOP_VER" = "$VERSION" ] \
-    && [ "$MARKET_PLUG_VER" = "$VERSION" ]
+  python3 scripts/validate_versions.py --root "$REPO_ROOT" --tag "$TAG" >/dev/null
 }
 
 bump_files() {
@@ -69,8 +57,14 @@ bump_files() {
   jq --indent 2 --arg v "$VERSION" '.version = $v' \
     .claude-plugin/plugin.json > .claude-plugin/plugin.json.tmp \
     && mv .claude-plugin/plugin.json.tmp .claude-plugin/plugin.json
-  jq --indent 2 --arg v "$VERSION" '.version = $v | .plugins[0].version = $v' \
-    .claude-plugin/marketplace.json > .claude-plugin/marketplace.json.tmp \
+  jq --indent 2 --arg v "$VERSION" '
+    .version = $v
+    | if ([.plugins[] | select(.name == "pcxa")] | length) != 1 then
+        error("expected exactly one pcxa marketplace plugin")
+      else
+        .plugins |= map(if .name == "pcxa" then .version = $v else . end)
+      end
+  ' .claude-plugin/marketplace.json > .claude-plugin/marketplace.json.tmp \
     && mv .claude-plugin/marketplace.json.tmp .claude-plugin/marketplace.json
 }
 
@@ -112,14 +106,12 @@ fi
 if all_versions_match_target; then
   echo "✓ phase 1 (bump): already at $VERSION"
 else
-  read_versions
-  CURR="$PYPROJ_VER"
+  CURR="$(grep -E '^version = ' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
   echo "→ phase 1 (bump): $CURR → $VERSION"
   bump_files
   if ! all_versions_match_target; then
     echo "error: bump did not land on all 5 sites" >&2
-    read_versions
-    echo "  pyproject.toml=$PYPROJ_VER init=$INIT_VER plugin=$PLUGIN_VER marketplace.top=$MARKET_TOP_VER marketplace.plugin=$MARKET_PLUG_VER" >&2
+    python3 scripts/validate_versions.py --root "$REPO_ROOT" --tag "$TAG" >&2
     exit 1
   fi
   echo "  bumped"

@@ -26,10 +26,21 @@ dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+dev = ["pytest>=7", "ruff==0.16.9"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+# Use Ruff's standard pycodestyle/pyflakes baseline. These four existing
+# hygiene codes remain explicit debt; syntax and undefined-name checks fail.
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E741", "F401", "F541", "F841"]
 
 [project.urls]
 Homepage = "https://github.com/PCX-Analytics/pcxa-skill"
