@@ -326,9 +326,11 @@ def build_parser():
                         "fixed at --concurrency for the whole run.")
     p.add_argument("--max-failures", dest="max_failures", type=int, default=100,
                    help="Abort the run if failure events reach this count "
-                        "(default: 100); exits 4 and reports the files it "
-                        "never reached as not_attempted. One failed batch is "
-                        "one event. Set 0 to disable the circuit breaker.")
+                        "(default: 100): failed uploads and rows the server "
+                        "rejects both count, and one failed batch is one "
+                        "event. Exits 4; no further batch is registered and "
+                        "the files it never reached are reported as "
+                        "not_attempted. Set 0 to disable the circuit breaker.")
     p.add_argument("--part-concurrency", dest="part_concurrency", type=int, default=4,
                    help="Parallel parts per multipart upload (default: 4, "
                         "max: 16). Decoupled from --concurrency to keep "

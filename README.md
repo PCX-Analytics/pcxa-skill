@@ -212,10 +212,9 @@ for non-zero now sees partial runs as failures, which is the point.
 The summary (`--format json`) adds up:
 `created + duplicate + error + unrecognized + not_attempted == to_upload`.
 `not_attempted` is what an abort or Ctrl-C never reached; re-running the same
-command with the same `--manifest` picks those files up. One known exception:
-a bulk-register still in flight when the run finishes, if it takes longer than
-the 10 s the CLI waits for it, lands on the server after the summary is
-printed ([#27](https://github.com/PCX-Analytics/pcxa-skill/issues/27)).
+command with the same `--manifest` picks those files up. `--max-failures`
+counts files the server rejects as well as failed uploads, and once it trips no
+further batch is registered.
 
 **What `--trust-manifest` gives up.** Only rows the server confirmed
 (`created` / `duplicate`) are written to the manifest, so a file that failed
