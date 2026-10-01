@@ -10,7 +10,10 @@ persisted rows agree*. Before #25 none of the three were guaranteed:
 * a final bulk-register 503 that had committed some rows before the server
   lost its database connection was booked as N errors, contradicting the
   database and leaving the committed rows out of the manifest;
-* rows the server rejected never tripped ``--max-failures`` (#29 review).
+* rows the server rejected never tripped ``--max-failures`` (#29 review);
+* the final report was printed after waiting only 10 s for the background
+  flush worker, so a bulk-register still in flight -- one 100-item batch --
+  landed on the server and never reached the summary or the manifest (#27).
 
 Every test drives the real ``cmd_files_sync`` against a fake API origin and a
 fake storage PUT, and asserts the SUMMARY INVARIANT the fix establishes::
@@ -487,3 +490,61 @@ def test_a_rejected_row_within_budget_does_not_abort(tmp_path, storage, capsys):
     assert summary["aborted_max_failures"] is False
     assert summary["error"] == 150
     _assert_invariant(summary)
+
+
+# ---------------------------------------------------------------------------
+# the report must wait for the last in-flight bulk-register
+# ---------------------------------------------------------------------------
+
+
+def test_the_summary_waits_for_a_bulk_register_still_in_flight(tmp_path, storage, capsys, monkeypatch):
+    """pcxa#1450 reported ``created`` exactly 100 short on two large syncs.
+
+    One flush is exactly ``BULK_REGISTER_FLUSH_SIZE`` (100) items, and the
+    background worker that sends it was given 10 s to finish before the
+    summary was printed. A bulk-register slower than that -- it has a 180 s
+    timeout for a reason -- landed on the server after the report, so its
+    files were in the database but not in the summary or the manifest.
+
+    Deterministic rather than slow: any thread join longer than 1 s is cut to
+    0.2 s, so "a batch slower than the wait" takes 1.5 s instead of >10 s. A
+    fixed wait of any length reproduces the defect under this seam; waiting
+    until the worker is done does not.
+    """
+    real_join = threading.Thread.join
+
+    def impatient_join(self, timeout=None):
+        if timeout is not None and timeout > 1:
+            timeout = 0.2
+        return real_join(self, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", impatient_join)
+
+    slow_batch_started = threading.Event()
+
+    def slow_first_batch(items):
+        if not slow_batch_started.is_set():
+            slow_batch_started.set()
+            threading.Event().wait(1.5)  # far longer than the cut-down wait
+        return _all_created(items)
+
+    # Slow enough that the background worker, not the final drain, sends the
+    # first 100 -- otherwise this passes on the old code and proves nothing.
+    storage.delay = 0.02
+    manifest = tmp_path / "m.json"
+    n = sync.BULK_REGISTER_FLUSH_SIZE + 20
+    client = FakeOrigin(register=slow_first_batch)
+    rc, summary = _run(client,
+                       _args(_tree(tmp_path, n), manifest=str(manifest), concurrency=4,
+                             max_concurrency=4),
+                       capsys)
+
+    assert slow_batch_started.is_set()
+    assert len(client.register_calls) >= 2, (
+        f"the first batch went out with the final drain ({len(client.register_calls)} call) -- "
+        "the worker never had it in flight, so this test proves nothing"
+    )
+    assert summary["created"] == n, f"summary reports {summary['created']} created of {n} registered"
+    _assert_invariant(summary)
+    assert len(_json.loads(manifest.read_text())["files"]) == n
+    assert rc == 0

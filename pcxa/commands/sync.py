@@ -354,9 +354,7 @@ def cmd_files_sync(client, args):
         # Files the run never reached because it stopped early (budget abort
         # or Ctrl-C). Counted from the work items themselves, so
         #   created + duplicate + error + unrecognized + not_attempted == to_upload
-        # holds on every path that prints a summary (#25) -- except a
-        # bulk-register still in flight when the 10 s flush-worker wait below
-        # gives up, which is #27.
+        # holds on every path that prints a summary (#25).
         "not_attempted": 0,
         "aborted_max_failures": False,
         "concurrency_final": initial_concurrency,
@@ -1760,7 +1758,15 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     # Stop the background flush worker before we do the final drain, so
     # we don't race it for the last `pending` items.
     flush_done.set()
-    flush_thread.join(timeout=10.0)
+    # Wait for the batch it is sending, however long it takes. This used to
+    # give up after 10 s, and a bulk-register still in flight then landed on
+    # the server after the summary was printed: its files were in the
+    # database but not in the summary or the manifest -- one 100-item flush,
+    # the "created is exactly 100 short" of PCX-Analytics/pcxa#1450 (#27).
+    # Bounded all the same: every POST it makes has BULK_REGISTER_TIMEOUT and
+    # BULK_REGISTER_RETRIES. Joined in slices so Ctrl-C still gets through.
+    while flush_thread.is_alive():
+        flush_thread.join(timeout=0.5)
     if stats_thread is not None:
         stats_thread.join(timeout=2.0)
 
