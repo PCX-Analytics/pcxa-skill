@@ -9,7 +9,8 @@ persisted rows agree*. Before #25 none of the three were guaranteed:
   not add up to ``to_upload`` and nothing said why;
 * a final bulk-register 503 that had committed some rows before the server
   lost its database connection was booked as N errors, contradicting the
-  database and leaving the committed rows out of the manifest.
+  database and leaving the committed rows out of the manifest;
+* rows the server rejected never tripped ``--max-failures`` (#29 review).
 
 Every test drives the real ``cmd_files_sync`` against a fake API origin and a
 fake storage PUT, and asserts the SUMMARY INVARIANT the fix establishes::
@@ -415,3 +416,74 @@ def test_a_rejected_row_never_enters_the_manifest_and_is_retried(tmp_path, stora
     assert summary["to_upload"] == 1, "the re-run must retry exactly the rejected file"
     assert [i["original_filename"] for i in rerun.register_calls[0]] == ["f000.pdf"]
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# the failure budget must also see rows the server rejects
+# ---------------------------------------------------------------------------
+
+
+def _reject_every_row(items):
+    return 200, {
+        "summary": {"created": 0, "duplicate": 0, "error": len(items), "unrecognized": 0,
+                    "total": len(items)},
+        "results": [{"index": i, "status": "error", "error": "junk filename rejected"}
+                    for i in range(len(items))],
+    }
+
+
+def test_rejected_rows_trip_the_failure_budget_and_stop_registering(tmp_path, storage, capsys):
+    """Review on #29: 300 rejected rows with ``--max-failures 1`` sent all three
+    100-row batches and exited 3.
+
+    Uploads are fast and concurrent here -- the realistic case -- so every file
+    is uploaded before the first bulk-register answers. The budget used to be
+    checked only when an upload completed, i.e. never after a rejection. Once
+    the first batch's 100 rejections exceed the budget, no further batch may be
+    sent; the files it would have carried were never registered, so they are
+    ``not_attempted``.
+    """
+    client = FakeOrigin(register=_reject_every_row)
+
+    rc, summary = _run(client, _args(_tree(tmp_path, 300), max_failures=1,
+                                     concurrency=8, max_concurrency=8), capsys)
+
+    assert len(client.register_calls) == 1, (
+        f"{len(client.register_calls)} bulk-register batches sent after the budget was exhausted by the first"
+    )
+    assert rc == sync.EXIT_ABORTED
+    assert summary["aborted_max_failures"] is True
+    assert summary["error"] == sync.BULK_REGISTER_FLUSH_SIZE
+    assert summary["not_attempted"] == 300 - sync.BULK_REGISTER_FLUSH_SIZE
+    _assert_invariant(summary)
+
+
+def test_rejections_after_the_last_upload_still_trip_the_budget(tmp_path, storage, capsys):
+    """The tail case, deterministically: exactly one batch, sent after every
+    upload has completed, so no upload completion can run the budget check
+    afterwards. Only the check made on the bulk-register response itself can
+    turn this run into an abort -- before #29's review it exited 3."""
+    client = FakeOrigin(register=_reject_every_row)
+
+    rc, summary = _run(client, _args(_tree(tmp_path, sync.BULK_REGISTER_FLUSH_SIZE),
+                                     max_failures=1, concurrency=8, max_concurrency=8), capsys)
+
+    assert len(client.register_calls) == 1
+    assert rc == sync.EXIT_ABORTED, f"exit {rc}: rejected rows did not trip --max-failures"
+    assert summary["aborted_max_failures"] is True
+    _assert_invariant(summary)
+
+
+def test_a_rejected_row_within_budget_does_not_abort(tmp_path, storage, capsys):
+    """Guard for the test above: the check must compare against the budget,
+    not fire on any rejection."""
+    client = FakeOrigin(register=_reject_every_row)
+
+    rc, summary = _run(client, _args(_tree(tmp_path, 150), max_failures=1000,
+                                     concurrency=8, max_concurrency=8), capsys)
+
+    assert len(client.register_calls) == 2
+    assert rc == sync.EXIT_PARTIAL
+    assert summary["aborted_max_failures"] is False
+    assert summary["error"] == 150
+    _assert_invariant(summary)

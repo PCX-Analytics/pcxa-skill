@@ -1094,6 +1094,30 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     def _account(entry):
         with accounted_lock:
             accounted.add(id(entry))
+
+    budget_lock = threading.Lock()
+
+    def _trip_budget_if_exhausted():
+        """Stop the run once --max-failures is crossed, whoever crossed it.
+
+        Called after every upload completion AND after every bulk-register
+        response. It used to run only on upload completion, so rows the server
+        rejected -- which arrive in the bulk-register response, usually after
+        every upload has finished -- never stopped anything: 300 rejected rows
+        with --max-failures 1 sent all three batches and exited 3 (review on
+        #29). Keyed on the summary flag rather than ``interrupted``, which the
+        normal end of the upload loop also sets.
+        """
+        with budget_lock:
+            if summary["aborted_max_failures"] or not _budget_exhausted(summary, max_failures):
+                return
+            summary["aborted_max_failures"] = True
+        interrupted.set()
+        _log_autotune(
+            f"[abort] failure budget exceeded "
+            f"({summary['failure_events']}/{max_failures} failure events, "
+            f"{summary['error']} files) — stopping."
+        )
     slots = AdjustableSemaphore(
         initial=initial_concurrency,
         minimum=min_concurrency,
@@ -1107,6 +1131,16 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
     def _flush_locked(items):
         if not items:
             return
+        if summary["aborted_max_failures"]:
+            # Uploaded, but the run stopped before registering them: they are
+            # not in the database. Counted here, explicitly, because they were
+            # already marked as reached when their upload completed (#29).
+            summary["not_attempted"] += len(items)
+            return
+        _register_batch(items)
+        _trip_budget_if_exhausted()
+
+    def _register_batch(items):
         # bulk-register is a heavy multi-row DB write — the default 30s
         # timeout is far too short for batches of 50+ files, and a
         # ConnectionError here means the R2 PUTs already succeeded but
@@ -1628,14 +1662,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                 size=entry.get("size"),
             )
         _render()
-        if _budget_exhausted(summary, max_failures) and not interrupted.is_set():
-            interrupted.set()
-            summary["aborted_max_failures"] = True
-            _log_autotune(
-                f"[abort] failure budget exceeded "
-                f"({summary['failure_events']}/{max_failures} failure events, "
-                f"{summary['error']} files) — stopping."
-            )
+        _trip_budget_if_exhausted()
 
     # Cap on submitted-but-not-completed work. The slots semaphore is
     # still the real concurrency gate; this just keeps the executor's
@@ -1686,6 +1713,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                             size=entry.get("size"),
                         )
                         _render()
+                        _trip_budget_if_exhausted()
                         submitted_any = True
                         continue
                     if url_or_marker is not None:
