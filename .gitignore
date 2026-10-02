@@ -20,8 +20,10 @@ venv/
 .idea/
 .DS_Store
 
-# Claude Code local state (settings.local.json, worktrees)
-.claude/
+# Claude Code local state (settings.local.json, worktrees). settings.json is
+# tracked: it carries the worktree.bgIsolation opt-in, which must travel.
+.claude/*
+!.claude/settings.json
 
 # Personal, machine-specific agent notes. Loads automatically alongside
 # CLAUDE.md; never travels with a clone.
