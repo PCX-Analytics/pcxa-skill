@@ -283,6 +283,20 @@ def build_parser():
         "sync",
         help="Recursively mirror a local directory into a PCXA folder "
              "(idempotent; creates subfolders to match the tree)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "exit status:\n"
+            "  0    every file queued for upload is registered (created or duplicate)\n"
+            "  1    bad input or startup failure (path, target folder, folder resolution)\n"
+            "  2    fatal: authentication expired\n"
+            "  3    partial: some files errored, were unrecognized by the server,\n"
+            "       or were not attempted\n"
+            "  4    aborted: --max-failures budget exhausted\n"
+            "\n"
+            "The summary satisfies\n"
+            "  created + duplicate + error + unrecognized + not_attempted == to_upload\n"
+            "(a Ctrl-C'd run exits 3, with the files it never reached as not_attempted)"
+        ),
     )
     p.add_argument("input_dir", help="Local directory to mirror")
     p.add_argument("--folder", type=int, default=None,
@@ -311,8 +325,12 @@ def build_parser():
                    help="Disable the AIMD auto-tuner. Concurrency stays "
                         "fixed at --concurrency for the whole run.")
     p.add_argument("--max-failures", dest="max_failures", type=int, default=100,
-                   help="Abort the run if cumulative errors reach this count "
-                        "(default: 100). Set 0 to disable the circuit breaker.")
+                   help="Abort the run if failure events reach this count "
+                        "(default: 100): failed uploads and rows the server "
+                        "rejects both count, and one failed batch is one "
+                        "event. Exits 4; no further batch is registered and "
+                        "the files it never reached are reported as "
+                        "not_attempted. Set 0 to disable the circuit breaker.")
     p.add_argument("--part-concurrency", dest="part_concurrency", type=int, default=4,
                    help="Parallel parts per multipart upload (default: 4, "
                         "max: 16). Decoupled from --concurrency to keep "
@@ -345,7 +363,10 @@ def build_parser():
                         "Much faster startup on resume runs against a "
                         "trusted manifest; risks creating duplicates if "
                         "files were added to the target folder via other "
-                        "means.")
+                        "means. Only files the server confirmed are recorded, "
+                        "so failed files are retried; but a file deleted on "
+                        "the server after it was recorded is never uploaded "
+                        "again.")
     p.add_argument("--error-log", dest="error_log", default=None,
                    help="Path to a JSON-Lines file. One line per per-file "
                         "or per-batch failure with phase (presign/put/"
