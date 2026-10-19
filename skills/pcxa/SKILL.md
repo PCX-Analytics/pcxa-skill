@@ -571,7 +571,7 @@ Requires an API with the WBS filters (PCX-Analytics/pcxa#2863). Against an older
 - Multiple close matches → lists candidates with IDs for you to pick
 - No match → suggests `pcxa project members` to list all
 
-**Custom-object fields:** `--custom-fields` takes a JSON map of `{custom_field_id: value}` (custom fields are defined at the project level). Values targeting a custom-object-backed field are fuzzy-validated the same way form submissions are — see **Custom Objects**. Pass `--no-fuzzy` to write the raw value.
+**Custom-object fields:** `--custom-fields` takes a JSON map of `{custom_field_id: value}` (custom fields are defined at the project level). On `update` the map merges into the activity's current values, and `null` clears one. Values targeting a custom-object-backed field are fuzzy-validated the same way form submissions are — see **Custom Objects**. Pass `--no-fuzzy` to write the raw value.
 
 **Invoicing workflow:** Query a user's activity in a billing period by name — no `--status` filter needed since `--after`/`--before` captures any work (started, progressed, or completed):
 ```bash
