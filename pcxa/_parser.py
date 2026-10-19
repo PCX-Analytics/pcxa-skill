@@ -748,7 +748,8 @@ def build_parser():
     p.add_argument("--parent", type=int, help="0=root")
     p.add_argument("--tags")
     p.add_argument("--custom-fields", dest="custom_fields",
-                   help='Custom-field values JSON keyed by custom-field id '
+                   help='Custom-field values JSON keyed by custom-field id, merged into the '
+                        "activity's current values; null clears one "
                         '(custom-object-backed values are fuzzy-validated)')
     p.add_argument("--no-fuzzy", dest="no_fuzzy", action="store_true",
                    help="Skip fuzzy validation of custom-object field values (write as-is)")

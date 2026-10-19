@@ -22,10 +22,10 @@ PRIORITY_MAP = {0: "-", 1: "Low", 2: "Med", 3: "High", 4: "Critical"}
 
 # Payload key carrying custom-field values on an activity (keyed by custom-field
 # id). Activity custom fields are defined at ``activities/custom-fields/`` — the
-# activity analogue of a form's fields. The exact attribute couldn't be confirmed
-# on the (permission-gated) test account; it's centralized here so confirming the
-# real name is a one-line change.
-_CUSTOM_FIELDS_KEY = "custom_field_values"
+# activity analogue of a form's fields. The server reconciles an activity's
+# custom fields to exactly the dict sent under this key, so an update merges its
+# values into the activity's current ones (``cmd_activities_update``).
+_CUSTOM_FIELDS_KEY = "custom_field_data"
 
 
 def _validate_activity_choice_values(client, values, args):
@@ -366,6 +366,11 @@ def cmd_activities_update(client, args):
         print(f"Would UPDATE activity {args.activity_id}: {json.dumps(payload, indent=2)}")
         return
     _validate_activity_choice_values(client, cf, args)
+    if cf:
+        # Sent alone, these keys would clear every other custom field. The
+        # values read back ({id, label} for a choice) are accepted as written.
+        current = client.get(f"activities/{args.activity_id}/").get(_CUSTOM_FIELDS_KEY) or {}
+        payload[_CUSTOM_FIELDS_KEY] = {**current, **cf}
     data = client.patch(f"activities/{args.activity_id}/", payload)
     if args.format == "json":
         out_json(data)
