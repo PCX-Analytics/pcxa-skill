@@ -1005,6 +1005,40 @@ pcxa chat models                                                      # list ava
 
 **How it works:** `chat send` submits a message, waits for the platform's assistant task to finish, and returns the assistant response. Exit code 2 means the task failed. `--no-wait` skips polling and returns the task ID immediately.
 
+## Audit Log (company admins)
+
+Who opened, downloaded or was shown which files. **Company-scoped** (needs no project; `--company` overrides the profile/`.pcxa` company) and readable by **company admins only** — anyone else gets a 403.
+
+```bash
+pcxa audit list --user jane@example.com --since 2026-09-01 -f table    # one person
+pcxa audit list --type file.presign.issued --since 2026-09-14           # downloads and previews
+pcxa audit list --search "site plan" --until 2026-09-13 -f table        # label / username / event contains
+pcxa audit list --user jane@example.com --csv jane.csv                  # every matching event to a spreadsheet
+pcxa audit history 16457660 --csv file-16457660.csv                     # one file's full history, oldest first
+pcxa audit history 812 --resource-type folder.Folder                    # any other resource
+```
+
+| Event type | Meaning |
+|---|---|
+| `files.get` | a file's record opened in the app or API |
+| `file.presign.issued` | file bytes handed out: a download or in-app preview |
+| `file.bulk_download.entry` | a file included in a bulk download |
+| `file.search_excerpt` | file text shown in a search result or to the assistant |
+| `file.ai_read` / `file.ai_viewed_pages` / `file.ai_quoted` | the assistant read, looked at, or quoted the file |
+| `file.email_preview` | an email previewed |
+| `file.container_entry` | a file opened inside a zip or mailbox |
+
+Not exhaustive: `event_type` is free text server-side. Assistant rows carry `is_ai_agent` and `conversation_id` (in `details`).
+
+**Read the output correctly:**
+
+- **`--user` takes an email.** The log stores an internal username that is *usually* the email prefix but gets a numeric suffix on collision (`jdoe`, `jdoe1`), so a guessed prefix can return nobody or someone else. An email is resolved against current company members; for a former member, pass the exact username (find it with `--search`).
+- **Dates are UTC.** `--since` is inclusive; `--until YYYY-MM-DD` includes that whole day. The server has no date filter, so the CLI pages newest-first and stops at `--since` — a wide window on a busy company reads many pages.
+- **`list` stops at 500 rows on screen**, and says so on stderr when more exist; `--csv` exports everything unless you pass `--limit`.
+- **An empty `history` is not proof of no access.** If the company has chain-of-custody auditing disabled, the CLI warns on stderr and JSON shows `"audit_enabled": false`. A file's history also includes folder downloads that carried it.
+- **`history` is rate-limited to 10 requests/hour per user**, shared with audit verification (one request per 1000 events). If the limit hits mid-history the CLI exits 1 and writes no partial file.
+- The CSV keeps `sequence_number` (the ledger's chain position) and the full `details` JSON.
+
 ## Reporting API errors
 
 When a PCXa CLI command returns a non-2xx API response, surface the endpoint, status code, and response body to the user. Do not invent alternate data paths; ask the user how they want to proceed.

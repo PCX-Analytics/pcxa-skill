@@ -235,9 +235,13 @@ def validate_choice_field_values(client, fields, values):
     return problems, notes
 
 
-def resolve_ids(client):
-    """Auto-resolve company_id / project_id when only one is available."""
-    if client.company_id and client.project_id:
+def resolve_ids(client, need_project=True):
+    """Auto-resolve company_id / project_id when only one is available.
+
+    ``need_project=False`` is for company-scoped commands: a missing project
+    is left unresolved instead of exiting on "Multiple projects".
+    """
+    if client.company_id and (client.project_id or not need_project):
         return
     try:
         if not client.company_id:
@@ -248,7 +252,7 @@ def resolve_ids(client):
             else:
                 print("Multiple companies. Use --company or set in profile.", file=sys.stderr)
                 sys.exit(1)
-        if not client.project_id:
+        if need_project and not client.project_id:
             data = client.get_raw(f"{client.base_url}/api/companies/{client.company_id}/projects/")
             projects = data.get("results", data) if isinstance(data, dict) else data
             if len(projects) == 1:

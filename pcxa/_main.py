@@ -184,11 +184,16 @@ from pcxa.commands.links import (
     cmd_links_delete,
     cmd_links_list,
 )
+from pcxa.commands.audit import cmd_audit_history, cmd_audit_list
 from pcxa.commands.tags_folders import DELETION_TAG  # noqa: F401  (re-export for legacy callers)
 from pcxa._update import cmd_update
 
 
 AUTH_FREE = {"login", "setup", "whoami", "set-project", "projects", "update"}
+
+# Commands that address a company, never a project: they take `--company` and
+# must not fail on "Multiple projects" for a user who can see several.
+COMPANY_ONLY = {"audit"}
 
 
 HANDLERS = {
@@ -301,6 +306,7 @@ SUB_HANDLERS = {
         "send": cmd_chat_send, "ls": cmd_chat_ls, "get": cmd_chat_get,
         "new": cmd_chat_new, "delete": cmd_chat_delete, "models": cmd_chat_models,
     },
+    "audit": {"list": cmd_audit_list, "history": cmd_audit_history},
 }
 
 
@@ -322,6 +328,7 @@ SUB_COMMAND_KEYS = {
     "links": "links_command",
     "comments": "comments_command",
     "chat": "chat_command",
+    "audit": "audit_command",
 }
 
 
@@ -378,7 +385,10 @@ def main():
     profile_name = args.profile or config.get("default_profile")
     _, profile = get_profile(config, profile_name)
     client = APIClient(profile, profile_name, config, timeout=http_timeout)
-    resolve_ids(client)
+    company_only = args.command in COMPANY_ONLY
+    if company_only and getattr(args, "company", None):
+        client.company_id = args.company
+    resolve_ids(client, need_project=not company_only)
 
     try:
         # A handler may return an int exit code; anything else (the common case —
@@ -429,6 +439,7 @@ def main():
 __all__ = [
     "main",
     "AUTH_FREE",
+    "COMPANY_ONLY",
     "HANDLERS",
     "SUB_HANDLERS",
     "SUB_COMMAND_KEYS",

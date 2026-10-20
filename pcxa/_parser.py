@@ -9,6 +9,8 @@ import argparse
 
 from pcxa import __version__
 from pcxa.commands.activities import MAX_TAG_FILTER_TAGS, TAG_FILTER_MODES
+from pcxa.commands.audit import DEFAULT_SCREEN_LIMIT as AUDIT_DEFAULT_SCREEN_LIMIT
+from pcxa.commands.audit import FILE_EVENT_TYPES_HELP as AUDIT_EVENT_TYPES_HELP
 from pcxa.commands.chunks import (
     DEFAULT_EMBEDDING_MODEL as CHUNK_DEFAULT_EMBEDDING_MODEL,
 )
@@ -1472,6 +1474,40 @@ def build_parser():
     p.add_argument("conversation_id", type=int)
 
     chat_sub.add_parser("models", help="List available AI models")
+
+    # ── audit (company-scoped, company admins only) ──
+    audit_p = sub.add_parser(
+        "audit", help="Company audit log: who opened, downloaded or was shown which files (company admins)",
+        description="Read the company audit log. Company-scoped: needs no project, and "
+                    "only company admins can read it.",
+        epilog=AUDIT_EVENT_TYPES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    audit_sub = audit_p.add_subparsers(dest="audit_command")
+
+    p = audit_sub.add_parser(
+        "list", help="Audit events, newest first",
+        epilog=AUDIT_EVENT_TYPES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--user", help="Email (resolved against company members) or exact username. "
+                                  "Usernames are internal handles, not always the email prefix.")
+    p.add_argument("--type", help="Exact event type, e.g. file.presign.issued")
+    p.add_argument("--category", help="Event category, e.g. data_access, data_export")
+    p.add_argument("--resource-type", dest="resource_type", help="Exact resource type, e.g. file.File")
+    p.add_argument("--search", help="Case-insensitive contains across username, resource label and event type")
+    p.add_argument("--since", help="Oldest event to include: YYYY-MM-DD or ISO time (UTC)")
+    p.add_argument("--until", help="Newest event to include: YYYY-MM-DD (whole day) or ISO time (UTC, exclusive)")
+    p.add_argument("--limit", type=int, default=None,
+                   help=f"Stop after this many events (0 = all; default {AUDIT_DEFAULT_SCREEN_LIMIT} "
+                        "on screen, all with --csv)")
+    p.add_argument("--csv", help="Write events to this CSV instead of printing them")
+    p.add_argument("--company", type=int, help="Company ID (default: the profile/.pcxa company)")
+
+    p = audit_sub.add_parser("history", help="Every recorded access to one file (or other resource), oldest first")
+    p.add_argument("resource_id", help="File ID (or the resource's ID with --resource-type)")
+    p.add_argument("--resource-type", dest="resource_type", default="file.File",
+                   help="Resource type (default: file.File, which also covers folder downloads that included it)")
+    p.add_argument("--csv", help="Write events to this CSV instead of printing them")
+    p.add_argument("--company", type=int, help="Company ID (default: the profile/.pcxa company)")
 
     _propagate_format_to_subparsers(parser)
     _propagate_dry_run_to_subparsers(parser)

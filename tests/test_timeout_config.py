@@ -192,7 +192,7 @@ def _run_main(monkeypatch, argv):
     monkeypatch.setattr(main_mod, "load_config", lambda: {"default_profile": "p"})
     monkeypatch.setattr(main_mod, "get_profile", lambda cfg, name: (name, {}))
     monkeypatch.setattr(main_mod, "APIClient", StubClient)
-    monkeypatch.setattr(main_mod, "resolve_ids", lambda c: None)
+    monkeypatch.setattr(main_mod, "resolve_ids", lambda c, **kw: None)
     monkeypatch.setattr(main_mod, "_check_for_update", lambda: None)
     monkeypatch.setitem(main_mod.HANDLERS, "tree", lambda c, a: None)
 
