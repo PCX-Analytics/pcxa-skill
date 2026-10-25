@@ -275,12 +275,15 @@ def test_the_exit_codes_do_not_collide_with_existing_ones():
     """1 = input/startup and 2 = fatal/auth are already taken; 130 is SIGINT."""
     assert {sync.EXIT_PARTIAL, sync.EXIT_ABORTED}.isdisjoint({0, 1, 2, 130})
     assert sync.EXIT_PARTIAL != sync.EXIT_ABORTED
+    assert sync.EXIT_INTERRUPTED == 130
 
 
-def test_an_interrupted_run_exits_partial_and_accounts_for_the_rest(tmp_path, storage, capsys, monkeypatch):
+def test_an_interrupted_run_exits_130_and_accounts_for_the_rest(tmp_path, storage, capsys, monkeypatch):
     """Ctrl-C is caught inside the upload loop so partial progress is flushed;
     it must still not report success, and the files it never reached are
-    not_attempted -- the summary still adds up."""
+    not_attempted -- the summary still adds up. It exits 130 with
+    ``interrupted: true``, so a script can tell "stopped by the operator"
+    (resume it) from "finished with failures" (investigate) (#28)."""
     real_wait = sync.wait
     calls = {"n": 0}
 
@@ -296,7 +299,8 @@ def test_an_interrupted_run_exits_partial_and_accounts_for_the_rest(tmp_path, st
     rc, summary = _run(FakeOrigin(), _args(_tree(tmp_path, 30)), capsys)
 
     assert calls["n"] >= 2, "the interrupt was never injected"
-    assert rc == sync.EXIT_PARTIAL
+    assert rc == sync.EXIT_INTERRUPTED == 130
+    assert summary["interrupted"] is True
     assert summary["not_attempted"] > 0, "the interrupt stopped nothing, so this test proves nothing"
     _assert_invariant(summary)
 

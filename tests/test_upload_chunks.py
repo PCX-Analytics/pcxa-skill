@@ -11,6 +11,7 @@ from argparse import Namespace
 import pytest
 
 from pcxa.commands import chunks as C
+from pcxa.commands.ocr import _item_bytes
 from tests.conftest import FakeResponse, RecordingSession
 
 
@@ -197,6 +198,113 @@ def test_batches_split_on_chunk_budget(client, tmp_path):
 
     posts = [c for c in client.session.calls if c["method"] == "POST"]
     assert [len(p["json"]["items"]) for p in posts] == [1, 1, 1]
+
+
+class CappedSession(RecordingSession):
+    """A server with a request-body cap: 413 for any body over ``cap`` bytes,
+    measured the way the transport serializes it (#35)."""
+
+    def __init__(self, cap):
+        super().__init__()
+        self.cap = cap
+
+    def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        body = kwargs.get("json") or {}
+        if len(json.dumps(body).encode("utf-8")) > self.cap:
+            return FakeResponse(413, {"detail": "Request body too large."})
+        return _ok([i["file_id"] for i in body["items"]])
+
+
+def _embedded_records(n_files, chunks_per_file=4):
+    return [{"file_id": i, "chunks": [
+        {"chunk_index": j, "content": "x" * 500, "embedding": EMB}
+        for j in range(chunks_per_file)]} for i in range(n_files)]
+
+
+def _one_item_bytes():
+    """Serialized size of one ``_embedded_records`` item, as the budget measures it."""
+    item, _ = C._validate_record(_embedded_records(1)[0], source="s", line_no=1,
+                                 by_path={}, by_name={})
+    return _item_bytes(item)
+
+
+def _accepted(session):
+    return [c for c in session.calls if c["method"] == "POST"
+            and len(json.dumps(c["json"]).encode("utf-8")) <= session.cap]
+
+
+def test_batches_split_on_byte_budget(client, tmp_path, capsys):
+    """A count-full batch over the server's body cap must be split by bytes
+    before it is sent, with no 413 at all."""
+    src = _jsonl(tmp_path, *_embedded_records(10))
+    item_size = _one_item_bytes()
+    cap = item_size * 4                       # the server takes ~3 files per request
+    client.session = CappedSession(cap)
+
+    rc = C.cmd_files_upload_chunks(client, _args([src], max_bytes=cap - 1024))
+
+    out = json.loads(capsys.readouterr().out)
+    posts = [c for c in client.session.calls if c["method"] == "POST"]
+    assert rc == 0, out["errors"]
+    assert out["files_applied"] == 10 and out["errors"] == []
+    assert len(_accepted(client.session)) == len(posts), "a request went over the cap (413)"
+    assert sum(len(p["json"]["items"]) for p in posts) == 10
+
+
+def test_dry_run_counts_requests_under_the_byte_budget(client, tmp_path, capsys):
+    src = _jsonl(tmp_path, *_embedded_records(10))
+    item_size = _one_item_bytes()
+
+    C.cmd_files_upload_chunks(client, _args([src], dry_run=True, max_bytes=item_size * 2))
+
+    assert json.loads(capsys.readouterr().out)["requests"] == 5
+    assert client.session.calls == []
+
+
+def test_a_single_file_over_the_byte_budget_is_rejected_by_name(client, tmp_path, capsys):
+    records = _embedded_records(3)
+    records[1]["chunks"] = [{"chunk_index": j, "content": "y" * 4000, "embedding": EMB}
+                            for j in range(40)]
+    src = _jsonl(tmp_path, *records)
+    client.session = RecordingSession(responses=[_ok([0, 2])])
+
+    rc = C.cmd_files_upload_chunks(client, _args([src], max_bytes=200_000))
+
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert rc == 1
+    assert out["files_rejected"] == 1
+    assert "file 1 serializes to" in captured.err and "split the document" in captured.err
+    sent = [i["file_id"] for c in client.session.calls for i in c["json"]["items"]]
+    assert sent == [0, 2], "the oversize file must not be sent; the others must"
+
+
+def test_a_413_splits_the_batch_until_it_fits(client, tmp_path, capsys):
+    """A server whose cap is below our budget (older server, lowered config):
+    every file still lands, through split-on-413."""
+    src = _jsonl(tmp_path, *_embedded_records(8))
+    item_size = _one_item_bytes()
+    client.session = CappedSession(item_size * 2 + 1024)    # 2 files per request
+
+    rc = C.cmd_files_upload_chunks(client, _args([src]))     # default 100 MiB budget
+
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0, out["errors"]
+    assert out["files_applied"] == 8 and out["errors"] == []
+    accepted = _accepted(client.session)
+    assert sorted(i["file_id"] for c in accepted for i in c["json"]["items"]) == list(range(8))
+
+
+def test_a_413_on_one_file_is_reported_against_that_file(client, tmp_path, capsys):
+    src = _jsonl(tmp_path, *_embedded_records(2))
+    client.session = CappedSession(1000)                      # nothing fits
+
+    rc = C.cmd_files_upload_chunks(client, _args([src]))
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "file 0: the server refused" in err and "file 1: the server refused" in err
 
 
 def test_request_caps_are_clamped_to_server_maxima(client, tmp_path):
@@ -430,3 +538,21 @@ def test_set_index_mode_with_no_ids_at_all_errors(client, capsys):
     assert C.cmd_files_set_index_mode(client, _mode_args()) == 1
     assert client.session.calls == []
     assert "--from-manifest" in capsys.readouterr().err
+
+
+def test_set_index_mode_reports_unchanged_alongside_updated(client, capsys):
+    """#22: a re-run over files already at the target mode is 0 updated, N
+    unchanged — not '0 updated', which reads as nothing happened."""
+    client.session = RecordingSession(responses=[
+        FakeResponse(200, {"updated": 2, "unchanged": 5, "skipped": []}),
+    ])
+
+    C.cmd_files_set_index_mode(client, _mode_args(file_ids=[str(i) for i in range(7)]))
+    assert json.loads(capsys.readouterr().out)["unchanged"] == 5
+
+    client.session = RecordingSession(responses=[
+        FakeResponse(200, {"updated": 2, "unchanged": 5, "skipped": []}),
+    ])
+    C.cmd_files_set_index_mode(client, _mode_args(file_ids=[str(i) for i in range(7)],
+                                                  format="table"))
+    assert "2 updated, 5 unchanged, 0 skipped" in capsys.readouterr().out
