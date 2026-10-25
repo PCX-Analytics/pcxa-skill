@@ -1,6 +1,6 @@
 ---
 name: pcxa
-description: PCXA construction intelligence platform CLI. Search/read files, manage tags and folders, manage activities/steps/progress/dependencies, manage form templates/fields/submissions, manage custom objects (field choices) with fuzzy "did you mean?" value matching, manage resources/timesheets/cost-codes/budgets, manage entity links between objects, and chat with the project's AI assistant. Use when the user asks about project files, documents, tasks, activities, forms, custom objects, resources, timesheets, entity links, project management, or wants to send messages to the AI chatbot.
+description: PCXA construction intelligence platform CLI, a near 1:1 replacement for the web UI. Search/read/upload/sync files (incl. bring-your-own chunks and OCR), manage tags and folders, manage activities/steps/progress/dependencies, baselines, calendars, activity types and custom fields, photos, drawings, comment threads, invoicing (contracts, SOV, pay apps, change orders), members, permission groups, team invitations, notifications, workflows, automations, exports, and the company audit log, manage form templates/fields/submissions, manage custom objects (field choices) with fuzzy "did you mean?" value matching, manage resources/timesheets/cost-codes/budgets, manage entity links between objects, and chat with the project's AI assistant. Use when the user asks about project files, documents, tasks, activities, schedules, baselines, photos, drawings, invoices, members, permissions, audit logs (who opened or downloaded a file), forms, custom objects, resources, timesheets, entity links, project management, or wants to send messages to the AI chatbot.
 argument-hint: <command> [options]
 user-invocable: true
 disable-model-invocation: false
@@ -95,12 +95,6 @@ Fields: `name`, `code` (max 20), `description`, `scope-statement`, `industry`, `
 ```bash
 pcxa files list --ext PDF --search "keyword" --limit 50  # title trigram (fuzzy by default; exact first)
 pcxa files list --search "concret" --exact               # tighter title match (still AND-matches words, NOT a phrase)
-pcxa files query 'title:schedule AND precast AND delay'  # BOOLEAN: AND/OR/NOT + grouping (⚠ multi-term AND under-reports on projects without the fix — see below)
-pcxa files query 'title:report AND (delay OR "change order")'   # grouping + quoted phrase
-pcxa files query 'contract NOT draft' --ext PDF          # exclusion (impossible with --search/--content)
-pcxa files query 'title:"Case Memo"' --count-only        # true LITERAL phrase on the filename
-pcxa files list --content "IOCC-387"                     # literal substring in file BODY — every match, paginated (stable id order)
-pcxa files list --content "IOCC-387" --count-only        # exact total of content matches (count:0 = genuinely not located)
 pcxa files list --tags "urgent,review" --tags-mode all   # AND: files with ALL tags
 pcxa files search "natural language query"                    # hybrid keyword + semantic (same endpoint as the web UI)
 pcxa files search "query" --scope file,activity               # restrict source types (csv: file,activity,drawing,photo)
@@ -126,8 +120,8 @@ pcxa files sync /path/to/tree --folder 5 --include "*.pdf" --exclude "draft_*" -
 pcxa files delete 123 124 --yes                          # mark for deletion (adds 'to_delete' tag)
 pcxa files restore 123 124                               # remove 'to_delete' tag (undo)
 pcxa files list --tags to_delete                         # list everything pending deletion
-pcxa files set-index-mode 1 2 3 --mode none              # stop server-side indexing (BYOC prep)
-pcxa files upload-chunks corpus.jsonl --manifest .pcxa-sync.json   # supply your own chunks + vectors
+pcxa files set-index-mode 1 2 3 --mode none              # stop server-side indexing (BYOC prep); reports updated/unchanged/skipped
+pcxa files upload-chunks corpus.jsonl --manifest .pcxa-sync.json   # supply your own chunks + vectors (batches ≤ --max-bytes, 100 MiB)
 pcxa files upload-ocr ocr.jsonl --manifest .pcxa-sync.json --validate-only  # dry-run your own OCR
 pcxa files upload-ocr ocr.jsonl --manifest .pcxa-sync.json         # supply your own OCR (text + boxes)
 ```
@@ -419,7 +413,7 @@ emits.
 **Designed for TB-scale runs:**
 - **Auto-tuning concurrency** (default ON): an AIMD controller samples throughput and error rate every 10s and adjusts active workers via a runtime-resizable semaphore. Errors halve concurrency with a 30s cooldown; clean windows with rising throughput step it up. Bound by `--min-concurrency` / `--max-concurrency` (default 1 / 32). Pass `--no-auto-tune` to pin concurrency at `--concurrency` for the whole run. Tuner decisions print above the progress line so you can see what's happening.
 - **Failure-budget circuit breaker** (`--max-failures`, default 100): aborts the run cleanly if failure events hit the budget (one failed batch = one event; rows the server rejects count too, and no further batch is registered once it trips), so a misconfigured target folder doesn't burn hours of bandwidth. Exits `4`; files the abort never reached are reported as `not_attempted`, not as errors. Set `0` to disable.
-- **Exit status a script can trust** (0.8.0+): `0` every queued file registered · `1` bad input/startup · `2` auth expired · `3` partial (some files errored, unrecognized, or not attempted — a Ctrl-C'd run included) · `4` aborted by `--max-failures`. Before 0.8.0 a sync with failed files exited `0`. The JSON summary satisfies `created + duplicate + error + unrecognized + not_attempted == to_upload`.
+- **Exit status a script can trust** (0.8.0+): `0` every queued file registered · `1` bad input/startup · `2` auth expired · `3` partial (some files errored, unrecognized, or not attempted) · `4` aborted by `--max-failures` · `130` interrupted by Ctrl-C (`interrupted: true`; progress saved, re-run to resume). Before 0.8.0 a sync with failed files exited `0`. The JSON summary satisfies `created + duplicate + error + unrecognized + not_attempted == to_upload`.
 - **`--trust-manifest` limits**: only server-confirmed rows (`created`/`duplicate`) enter the manifest, so failed files are retried. The flag skips the server-side name check, so a file deleted on the server after being recorded is never re-uploaded — drop the flag when the target folder may have changed.
 - **Pre-flight folder check**: `GET /folders/{id}/` runs before walking, so an inaccessible target ID fails fast instead of mid-run. Retried with backoff — a transport hiccup on this call is not evidence the folder is missing.
 - **Resilient folder resolution**: folder creates and per-parent subfolder lookups run with a 180s floor (raised further by `--timeout`, never lowered) and retry on timeouts, 429s, and 5xx. The root-level listing on a project-root sync inherits the ordinary default rather than the floor, so `--timeout` is still worth setting there. Because folders are identified by (name, parent), a retry re-resolves by name first and adopts the folder if a timed-out create actually landed server-side, instead of making a duplicate. Auth/permission/validation errors still fail on the first attempt. Resolved folders are checkpointed into `--manifest` (`{relative_dir → folder_id}`) and reused on the next run, so a failure part-way through a wide tree doesn't throw away the whole run's setup.
@@ -435,48 +429,24 @@ emits.
 
 Search results include `url` fields — always show these to users for document links.
 
-**`--search` is fuzzy by default (`files list`, `files aggregate`, `activities list`).** Backend uses PostgreSQL trigram similarity: exact substring matches surface first (similarity ~1.0), then typo-tolerant matches ranked by similarity DESC, in a single paginated response. `concret` finds `Concrete Pour`; `0314` ranks `RFI-0314` above `Document-031499`. Pass `--exact` to opt back into tight substring matching (rejects typos — useful when the query is a known-correct identifier and you don't want fuzzy noise). **`--exact` is not a phrase match:** the words are still AND-matched separately, so `--search "Case Memo" --exact` also matches `Case Assessment Memorandum`. When you need a literal adjacent phrase in the filename, use `pcxa files query 'title:"Case Memo"'`. The backend rate-limits fuzzy search to 100/min per user; not normally a concern for agent use.
-
-**`files query` response shape:** `{query, parsed, results, total_files, count_exact, limit, offset}`. `parsed` is the canonical interpretation of your expression — surface it to the user when the result set matters. `count_exact: false` means `total_files` is a floor (ceiling reached), not a total. Rows carry `file_id`, `file_name`, `file_type`, `folder_path`, and a `url`.
+**`--search` is fuzzy by default (`files list`, `files aggregate`, `activities list`).** Backend uses PostgreSQL trigram similarity: exact substring matches surface first (similarity ~1.0), then typo-tolerant matches ranked by similarity DESC, in a single paginated response. `concret` finds `Concrete Pour`; `0314` ranks `RFI-0314` above `Document-031499`. Pass `--exact` to opt back into tight substring matching (rejects typos — useful when the query is a known-correct identifier and you don't want fuzzy noise). **`--exact` is not a phrase match:** the words are still AND-matched separately, so `--search "Case Memo" --exact` also matches `Case Assessment Memorandum`. The backend rate-limits fuzzy search to 100/min per user; not normally a concern for agent use.
 
 **Search response shape:** `pcxa files search` returns `{query, total_results, results, hybrid_enabled}` — a top-N reranked list (server-capped at 50). Each row carries `score`, `file_id`/`activity_id`, `file_name`/`title`, `folder_path`, `page_number`, `chunk_position`, and a `url`. Hybrid means semantic similarity and keyword matching over the project's chunk text are combined and reranked into a single ordering — the same path the web UI's search bar uses.
 
-**Four ways to find files — pick by what you need:**
+**Finding files — pick by what you need:**
 - **`files list --search <term>`** — matches the **title/filename** only (trigram). Paginated + countable. Use when you know part of the name.
-- **`files list --content <term>`** — matches the indexed **body/contents** as a **literal substring** (not ranked, not semantic). Paginated + **countable and exhaustive**: `--content <term> --count-only` gives the *exact* total and you can page through *every* match in a stable order (by `id`). `count: 0` means the term is genuinely in no in-scope file — so this is the path for a "not located" / completeness finding. Use it to find files by what's inside them — e.g. an eDiscovery estate where emails are named by bare Bates numbers (`YATES002119058`) and the term only appears in the body. Only indexed files match; scope with `--folder`/`--ext`/`--index-status`.
-- **`files search <term>` / `files content <term>`** — hybrid semantic + keyword **ranking** (relevance-ordered), a **top-50 reranked sample, not a total**. Best for natural-language / "most relevant" lookups. Do **not** use it to count or enumerate — it can't page past 50, and asking for more (`--limit 200`) is clamped to 50 with a notice pointing you at `--content`. For "how many / list them all", use `--content`.
-
-- **`files query '<expr>'`** — **boolean** search: `AND` / `OR` / `NOT`, parentheses for grouping, `title:` / `content:` field scoping, and `"quoted phrases"` matched adjacently. Structurally expressive where `--content` is a single literal. Use it whenever the question has more than one condition — *"schedule in the title AND both precast and delay in the body"* is one call: `pcxa files query 'title:schedule AND precast AND delay'`. Bare terms search content; operators must be UPPERCASE (lowercase `and`/`or` are ordinary words). Every response echoes `parsed` — **read it** to confirm the query was understood before trusting the results.
-
-  > ⚠️ **Multi-term `AND` is being fixed PER PROJECT — and nothing in the response tells you which behaviour you got.**
-  >
-  > **Old behaviour, still live on most projects:** two or more CONTENT terms joined by `AND` are chunk-scoped and UNDER-REPORT. The match requires the terms to fall in the *same passage* (~3,000 characters), not merely in the same file, so `precast AND delay` misses files where the words appear pages apart. Measured: **1,042 returned where 3,496 match** (~70% missed); on another shape, **3,738 returned where 9,342 match** (~60% missed).
-  >
-  > **New behaviour, rolling out:** `AND` is file-scoped, the count is correct, and totals are more often exact rather than capped.
-  >
-  > **The trap: `count_exact: true` appears in BOTH cases.** The old path returns a wrong number *and* labels it exact whenever it lands under the ceiling. So `count_exact` does not distinguish them, and neither does anything else in the payload.
-  >
-  > **So do not rest a completeness or "not located" finding on a multi-term `AND` unless you have confirmed the fix is live for that project.** Otherwise:
-  > - Run each content term as its own `files query` (or `files list --content <term>`, which IS exhaustive per term) and intersect the `file_id`s yourself. Slower, correct on every project.
-  > - Or ask which projects have the file-scoped fix enabled, and say so when you rely on it.
-  >
-  > Using `AND` for the stricter "these words near each other" reading stays legitimate — just describe it that way rather than calling it exhaustive.
-  >
-  > A single content term, `title:` predicates, `OR`, and `NOT` are unaffected. When the fix reaches a project, counts on existing `AND` queries **go up** — that is the correction, not a regression.
-
-`--search` and `--content` compose (title AND body) and combine with `--tags`, `--folder`, `--ext`, dates, etc. For anything beyond a plain AND of one title term and one body term, reach for `files query` instead.
-
-**`files query` limits (all reported, never silent):** at most 8 OR branches, 4 levels of nesting, 16 terms. A bare `NOT` is rejected — negation needs something positive to search within (`contract NOT draft`, not `NOT draft`). An `OR` whose branches are **two or more very common** content words is rejected as too broad with an actionable message; narrow one branch or run them separately. `count_exact: false` means a ceiling was hit and the number is a floor, not a total.
+- **`files search <term>` / `files content <term>`** — hybrid semantic + keyword **ranking** over file text (relevance-ordered), a **top-50 reranked sample, not a total**. This is the only way to search file *contents*.
+- **Retired with pcxa v1.1.24 (PCX-Analytics/pcxa#3850):** `files list --content` (literal, countable body search) and `files query` (boolean AND/OR/NOT, `title:` scoping). Both now exit 2 with a pointer and never call the server. Nothing replaces an exhaustive, countable body search: the keyword leg behind `files search` is ranked, capped and uncounted, with no field scoping. **So no content search can support a "not located" or completeness finding** — say so instead of implying one.
 
 **Paging through the matches (`--limit` / `--offset`).** Every `... list` subcommand — `files list`, `activities list`, `forms list`, `submissions list`, `custom-objects list`, `resources list`, `cost-codes list`, `budgets list`, `timesheets list` — returns **one page at a time**, defaulting to 25 or 50 rows. **A bare `list` call is never the complete set.** To enumerate everything, get the total first, then walk it:
 
 ```bash
-pcxa files list --content "IOCC-387" --count-only              # {"count": 137} ← the real total
-pcxa files list --content "IOCC-387" --limit 100 --offset 0    # rows 1–100
-pcxa files list --content "IOCC-387" --limit 100 --offset 100  # rows 101–137
+pcxa files list --tags review --count-only                     # {"count": 137} ← the real total
+pcxa files list --tags review --limit 100 --offset 0 --sort id # rows 1–100
+pcxa files list --tags review --limit 100 --offset 100 --sort id  # rows 101–137
 ```
 
-Increment `--offset` by `--limit` until you've collected `count` rows (or a page comes back short). With `--content` the order is by `id`, so paging is exhaustive — exactly `count` distinct ids, no repeats or skips. Report the number from `--count-only`, never the length of one page.
+Increment `--offset` by `--limit` until you've collected `count` rows (or a page comes back short); sort by a unique key (`--sort id`) so pages neither repeat nor skip. Report the number from `--count-only`, never the length of one page. `activities list` pages for you when `--limit` exceeds the server's 1,000-row page cap.
 
 **After search → read in batch.** Once `files search` returns the rows, prefer `files batch-read --chunk file_id:chunk_position` over N single `files read` calls. Each row carries a `chunk_position` — pass `file_id:chunk_position` as `--chunk` to read just the relevant excerpt + neighbors. One round trip instead of N. Use `--outline` for section maps when files are large and you need to plan further reads.
 
@@ -521,7 +491,7 @@ pcxa files update 10 --title "New" --tags a,b --folder 5      # single file upda
 
 ```bash
 pcxa activities list --status in_progress --priority 3,4
-pcxa activities list --search "foundation" --assignee 5 --sort -due_date  # fuzzy by default; add --exact for tight
+pcxa activities list --search "foundation" --assignee 5 --sort=-due_date  # fuzzy by default; add --exact for tight
 pcxa activities list --tags "structural,review" --tags-mode all  # AND mode
 pcxa activities list --after 2026-03-01 --before 2026-03-31       # updated in date range
 pcxa activities list --after last_month                          # relative dates supported
@@ -530,16 +500,23 @@ pcxa activities list --assignee 5 --after 2026-03-01 --before 2026-03-31  # user
 pcxa activities list --wbs 1.4.2                              # exact WBS path
 pcxa activities list --wbs-branch 1.4                         # 1.4 and everything under it
 pcxa activities list --wbs-branch 1.4 --status completed      # composes with any other filter
+pcxa activities list --type 170 --limit 5000                  # every Release (summary rows included; pages past 1000)
+pcxa activities list --root-only --include-archived           # top-level, archived too (--archived-only for just those)
+pcxa activities list --leaves-only                            # the web grid's flat view: no summary (parent) rows
 pcxa activities get 123                                       # detail + steps + deps
 pcxa activities create --title "Review" --priority 3 --type 5 --assignees 1,2
 pcxa activities create --title "Pour slab" --custom-fields '{"3":"Acme Corp"}'  # custom-object value, fuzzy-validated
+pcxa activities create --title "R4" --type 170 --code R4 --field "Version=1.4"  # custom field by LABEL
+pcxa activities update 123 --field "Size=M" --field "Points=3"  # labels resolve against the activity's type; "Size=" clears
 pcxa activities update 123 --status completed --percent 100
 pcxa activities update 123 --outcome "Grain is one row per charge per register."
 pcxa activities update 123 --outcome ""                       # clear a wrong outcome
 pcxa activities update 123 --custom-fields '{"3":"Acme Corp"}' --no-fuzzy        # write value as-is
 pcxa activities delete 123 456                                # bulk delete
-pcxa activities bulk-update 1 2 3 --status in_progress
-pcxa activities types                                         # list templates
+pcxa activities bulk-update 1 2 3 --status in_progress --owner 7
+pcxa activities bulk-update 1 2 3 --custom-fields '{"Size":"M"}'  # bulk accepts labels or ids as keys
+pcxa activities update 123 --code 4                           # the activity's own WBS segment; wbs_code is derived
+pcxa activities types                                         # list templates (full CRUD: `pcxa activity-types`)
 pcxa activities related 123                                   # linked files/folders/photos/forms
 ```
 
@@ -556,9 +533,11 @@ Do NOT put in descriptions: processing details, scripts, output file lists, stat
 
 Every edit is kept in the activity's history, so revising an outcome loses nothing. `--outcome ""` clears it.
 
-Two limits worth knowing before you plan around them. Both are lifted by PCX-Analytics/pcxa#2863, so check whether that has deployed before designing around them:
-- **`bulk-update` has no `--outcome`.** The server's bulk allow-list rejects the field. Update them one at a time.
-- **`activities list --search` does not read outcomes.** Server-side search covers title, description and WBS code only. The outcome *is* indexed for semantic search, so `pcxa chat send` can find it when `--search` cannot.
+`bulk-update --outcome` applies one text to every selected activity. One limit: **`activities list --search` does not read outcomes.** Server-side search covers title, description and WBS code only. The outcome *is* indexed for semantic search, so `pcxa chat send` can find it when `--search` cannot.
+
+**What `activities list` returns:** every matching activity, including summary rows (activities with children, e.g. Releases and Work Packages) — the CLI sends `include_summary=true`, which the web grid's flat view does not. `--leaves-only` restores the grid's view. Archived activities stay hidden unless `--include-archived` or `--archived-only`.
+
+**`bulk-update` flags** mirror the server's allow-list: `--status --owner --assigned-to --percent --due-date --type --outcome --tags --custom-fields`. Priority is not bulk-settable. Each 500-id chunk is atomic server-side: one bad row rolls back its chunk and is reported in `errors`.
 
 **WBS filters:** `--wbs 1.4.2` matches that one activity exactly. `--wbs-branch 1.4` returns 1.4 plus its whole subtree — 1.4.1, 1.4.2.7, at any depth — but **not** 1.40 or 1.41, which merely share a digit prefix. Both are server-side and compose with every other filter, and a `wbs` column is added to the table so you can confirm the scope rather than trust it.
 
@@ -571,7 +550,7 @@ Requires an API with the WBS filters (PCX-Analytics/pcxa#2863). Against an older
 - Multiple close matches → lists candidates with IDs for you to pick
 - No match → suggests `pcxa project members` to list all
 
-**Custom-object fields:** `--custom-fields` takes a JSON map of `{custom_field_id: value}` (custom fields are defined at the project level). On `update` the map merges into the activity's current values, and `null` clears one. Values targeting a custom-object-backed field are fuzzy-validated the same way form submissions are — see **Custom Objects**. Pass `--no-fuzzy` to write the raw value.
+**Custom fields:** `--field "Label=value"` (repeatable) is the easy path: the label is matched case-insensitively against the activity type's fields (on `create` pass `--type`), numbers and checkboxes are coerced, select values match by value or label, and `Label=` clears. A missing or ambiguous label exits 1 listing the type's labels. Fields defined only on a project's type extension are not resolved by label yet; use `--custom-fields` with the id. `--custom-fields` takes a JSON map of `{custom_field_id: value}`. On `update` the map merges into the activity's current values, and `null` clears one. Values targeting a custom-object-backed field are fuzzy-validated the same way form submissions are — see **Custom Objects**. Pass `--no-fuzzy` to write the raw value.
 
 **Invoicing workflow:** Query a user's activity in a billing period by name — no `--status` filter needed since `--after`/`--before` captures any work (started, progressed, or completed):
 ```bash
@@ -661,7 +640,7 @@ Types: `FS` (finish-to-start), `SS`, `FF`, `SF`. Lag in days (negative = lead).
 
 ```bash
 pcxa deps list --predecessor 10
-pcxa deps create --predecessor 10 --successor 20 --type FS --lag 2
+pcxa deps create --predecessor 10 --successor 20 --type FS --lag 2  # --lag defaults to 0 (the server requires lag_days)
 pcxa deps delete 456
 ```
 
@@ -1039,9 +1018,411 @@ Not exhaustive: `event_type` is free text server-side. Assistant rows carry `is_
 - **`history` is rate-limited to 10 requests/hour per user**, shared with audit verification (one request per 1000 events). If the limit hits mid-history the CLI exits 1 and writes no partial file.
 - The CSV keeps `sequence_number` (the ledger's chain position) and the full `details` JSON.
 
+## Schedule (baselines, calendars, work log, activity analytics)
+
+These commands cover the web UI's Activities > Baselines, Activities > CPM > Calendars and Activities > Work Log pages, plus Company Settings > Templates > Calendars. The schedule read-outs and lifecycle actions are subcommands of `activities`.
+
+```bash
+# Baselines (project only; writes need Company Admin)
+pcxa baselines list [--status approved|uncommitted|superseded] [--version N]
+pcxa baselines get 12
+pcxa baselines create                         # initial baseline (POST baselines/initialize/)
+pcxa baselines uncommitted                    # pending baseline (made on first read)
+pcxa baselines uncommitted-changes -f table   # field-by-field pending changes
+pcxa baselines approve 13 --description "Re-plan after RFI 42"
+pcxa baselines bulk-approve --activities 101,102 --description "..."   # omit --activities = all
+pcxa baselines changes 12 [--change-type update] [--activity 101] [--all]
+pcxa baselines comparison 12 5501             # current vs previous snapshot of one entry
+pcxa baselines update 12 --description "..."  ;  pcxa baselines delete 12
+
+# Calendars (--scope project is the default and ALSO lists company calendars)
+pcxa calendars list --scope company [--default company]
+pcxa calendars create --scope company --name "5x8" --working-days mon,tue,wed,thu,fri --hours-per-day 8
+pcxa calendars update 3 --hours-per-day 10 --working-days mon,tue,wed,thu
+pcxa calendars set-default 3                  # default for the calendar's own scope
+pcxa calendars effective                      # project default, else company default
+pcxa calendars exceptions list 3 [--type non_working|working]
+pcxa calendars exceptions create 3 --name "Christmas" --start 2026-12-25 [--end 2026-12-26] [--type working]
+pcxa calendars exceptions update 3 88 --end ""     # "" clears end_date (single day)
+pcxa calendars exceptions bulk-create 3 holidays.json   # [{"name","start_date","end_date"?,"exception_type"?}]
+pcxa calendars delete 3  ;  pcxa calendars exceptions delete 3 88
+
+# Work log (read-only; window of at most 90 days)
+pcxa work-log list --from 2026-10-01 --to 2026-10-25 [--group-by day|week|month] \
+  [--user 4,5] [--activity 101] [--event-type progress,comment,file,photo] [--page 2]
+
+# Activity analytics (read-only)
+pcxa activities schedule-summary | critical-path
+pcxa activities progress-summary [--period-days 14]
+pcxa activities progress-curve [--from 2026-01-01 --to 2026-10-25] [--interval weekly] [--rollup-method duration]
+pcxa activities baseline-curve                # planned vs actual against the latest APPROVED baseline
+pcxa activities trend [--days 90|all] [--status ...] [--search ...] [--params '{"tags":"7"}']
+pcxa activities wbs-tree [--parent 40] [--cursor C] [--page-size 200] [--search pump]
+pcxa activities field-changes 101
+
+# Activity lifecycle writes (one id = per-activity action; several = bulk_* in 500-id chunks)
+pcxa activities archive 101 102 ; pcxa activities unarchive 101
+pcxa activities restore 101 102               # soft-deleted activities
+pcxa activities reparent 101 102 --parent 40  # --parent none = WBS root
+pcxa activities toggle-closed 101             # flips closed/open; admin-level permission
+pcxa activities assign-users 101 --users 4,5 [--distribution 6]
+```
+
+Gotchas:
+- `--scope company` cannot see project calendars (404). Use the default project scope for them.
+- `is_company_default` is refused on a project calendar, and `is_project_default` on a company calendar. `set-default` picks the right flag for you.
+- `--working-days mon,tue` sets every day not listed to non-working. Pass a JSON object to send the dict as-is.
+- Bulk archive and unarchive need project or company admin. With one id, the command uses the per-activity action, which needs only edit permission on that activity.
+- Bulk results report per-id errors and exit 1 on a partial failure. `reparent` is atomic per 500-id chunk only.
+- `assign-users` replaces the assignee list and cannot clear it, because the server ignores an empty list. `--distribution` needs `--users` in the same call: the server errors on a distribution list sent alone.
+- Calendar `hard_delete`/`restore` are staff-only and not exposed. `activities what-if` is not exposed.
+
+## Activity templates and custom fields
+
+Web UI: Company Settings > Templates > Activity Types (`--scope company`) and Project
+Settings > Activities > Templates (default `--scope project`). An activity type carries
+template steps (copied onto each new activity) and custom fields (each field's `id` is the
+FieldDefinition id, which is also the key in an activity's `custom_field_data`).
+
+```bash
+# Activity types: project scope lists project types and company types together
+pcxa activity-types list                        # --scope company for company-only types
+pcxa activity-types get 24 --scope company      # detail + template steps
+pcxa activity-types create --name "Pour" --category Civil --scope company
+pcxa activity-types update 24 --default true --scope company   # default: company types only
+pcxa activity-types delete 24 --scope company
+pcxa activity-types categories
+pcxa activity-types schema 24                   # merged sections + fields (incl. project extension)
+pcxa activity-types default                     # the company default type
+
+# Template steps (weights always rebalance to 100% server-side)
+pcxa type-steps list 24 --scope company
+pcxa type-steps create 24 --name "Formwork" --weight 25 --order 1 --scope company
+pcxa type-steps update 24 311 --form 0          # 0 clears the required form
+pcxa type-steps reorder 24 --order 313,311,312
+pcxa type-steps weights 24 --set 311=30,312=70
+pcxa type-steps delete 24 311
+
+# Custom fields on a type
+pcxa type-fields list 24
+pcxa type-fields create 24 --label Size --type select --options S,M,L --required true --scope company
+pcxa type-fields create 24 --label Area --type choice --choice-id 4      # 4 = a custom object
+pcxa type-fields update 24 812 --options S,M,L,XL --help-text "T-shirt size"
+pcxa type-fields reorder 24 --order 813,812
+pcxa type-fields delete 24 812
+
+# A project adding fields to a company type, without copying it
+pcxa type-extensions create --base-type 24      # -> extension id, e.g. 9
+pcxa type-extension-fields create 9 --label Crew --type number
+pcxa type-extensions get 9                      # effective (company + project) fields
+
+# Field definitions, sections, validation rules (shared with forms)
+pcxa field-sections create --name "QA" --scope company
+pcxa field-definitions list --type number --scope company
+pcxa field-rules create 812 --rule-type min_value --value '{"min": 0}' --scope company
+```
+
+Gotchas:
+- Use the type's own scope for writes: edit a company type with `--scope company`.
+  `type-fields create|reorder` on the project route 404 for a company type; reading
+  (`type-fields list 24`) works on the project route for either.
+- `type-fields`/`type-extension-fields` ids are FieldDefinition ids, not link ids.
+- `type-fields delete` also deletes the FieldDefinition when no other type or form uses it.
+- `--options A,B` writes `options.dropdown`; select/radio need options or `--choice-id`,
+  choice needs `--choice-id`. `update --options` keeps the field's other option keys.
+- `table` fields are refused on activity types (no table schema); use a form field.
+- The web UI edits activity custom fields only through `type-fields` (+ `field-sections`).
+  `field-definitions` is the raw pool: a definition created there is not on any type.
+- Every write takes `--data '{...}'`, merged last, for keys without a flag.
+
+## Photos, drawings and comment threads
+
+Web UI `project/photos` (photo grid, layers and markups drawn on a photo),
+`project/drawings` (drawing register, revisions, the PDFs they come from), and
+the comment panel on a file, photo, form submission or drawing. All project-scoped.
+
+```bash
+# Photos
+pcxa photos list --search crane --category Safety --tags "subject: stairs" --tags-mode all
+pcxa photos list --date 2026-03 --sort=-uploaded_at --limit 100   # --date: YYYY, YYYY-MM, YYYY-MM-DD, today, this_week, unknown
+pcxa photos get 512
+pcxa photos update 512 --description "North wall crack" --category Defect --tags "defect,level 2"
+pcxa photos update 512 --lat 29.76 --lng -95.36 --date 2026-03-14   # --date "" clears photo_date
+pcxa photos upload ./site/IMG_0412.jpg --description "East elevation" --tags roof
+pcxa photos delete 512
+
+# Layers and markups on a photo
+pcxa photos layers list 512
+pcxa photos layers create 512 --name QA --order 2
+pcxa photos markups list 512 --layer 31
+pcxa photos markups create 512 --layer 31 --shape rect --coords '{"x":10,"y":20,"width":80,"height":40}' --text "crack"
+pcxa photos markups update 512 77 --properties '{"stroke":"#f00"}'
+pcxa photos markups delete 512 77
+
+# Drawings
+pcxa drawings list --discipline A,S --type plan --search "level 2"
+pcxa drawings get 88
+pcxa drawings update 88 --identifier A-201 --title "Level 2 Plan" --tags issued
+pcxa drawings status 88                       # page-extraction processing status
+pcxa drawings revisions list 88
+pcxa drawings revisions get 88 140
+pcxa drawings set-current 88 --revision 140   # make a revision current
+pcxa drawings delete 88
+
+# Source documents (the PDFs/images drawings are extracted from)
+pcxa drawings sources create --file-id 1001 1002   # from existing project files; no re-upload
+pcxa drawings sources list
+pcxa drawings sources status 12
+pcxa drawings sources drawings 12             # drawings extracted from it
+pcxa drawings sources retry 12                # only failed/cancelled documents
+pcxa drawings sources delete 12
+
+# Comment threads (--target file|photo|submission|drawing, then the item's id)
+pcxa threads list --target photo 512
+pcxa threads add -t drawing 88 --content "Grid line C is off" --mention 14 22
+pcxa threads add -t file 1001 --content "Agreed" --reply-to 301
+pcxa threads update -t submission 640 302 --content "Corrected"
+pcxa threads delete -t submission 640 302
+```
+
+Gotchas:
+- Photos have no title; the text field is `--description`. `--tags` on update
+  replaces the whole tag set.
+- `photos list` returns `count: null` (the server skips the count to stay fast);
+  page with `--limit/--offset` until a page comes back short.
+- `photos upload` presigns, PUTs to storage, creates the photo, then PATCHes
+  description/category/location/tags. It needs cloud storage enabled on the
+  server and uses a single PUT (fine for photos; no multipart path).
+- `drawings sources create` takes existing file ids (PDF/image); it reports
+  per-file errors and `already_imported` for repeats. Extraction is async:
+  poll `sources status`, then `sources drawings`.
+- Sort values starting with `-` need `=`: `--sort=-uploaded_at`.
+- `threads` is separate from `comments` (activity comments). You can only edit
+  or delete your own user comments; system and agent comments are read-only.
+- Every write takes `--dry-run`.
+
+## Invoicing (contracts, SOV, pay applications, change orders)
+
+The web UI's project **Invoicing** pages: contracts, their schedule of values, AIA G702/G703
+pay applications and change orders. Everything is project-scoped and nested under a contract,
+so every group except `contracts` takes `--contract ID`.
+
+```bash
+# Contracts (created as draft; contract_type: time_and_materials|fixed_price|unit_price|gmp)
+pcxa contracts list --status active --type fixed_price -f table
+pcxa contracts get 5 -f table                      # includes SOV items
+pcxa contracts create --name "Tower A" --type fixed_price --original-amount 125000.00 \
+  --retainage 10.00 --number C-001 --client-name "Acme" --start 2026-01-01 --end 2026-12-31
+pcxa contracts update 5 --original-amount 130000.00 --data '{"client_contact": "pm@acme.com"}'
+pcxa contracts delete 5                            # soft delete
+pcxa contracts restore 5                           # staff only
+
+# Schedule of values
+pcxa sov list --contract 5 -f table
+pcxa sov create --contract 5 --item-number 001 --description "Concrete" --value 25000.00 \
+  --activity 1234 --cost-code 56 --sort-order 1
+pcxa sov update 9 --contract 5 --value 26000.00
+pcxa sov delete 9 --contract 5                     # hard delete
+
+# Pay applications: draft -> submitted -> approved -> paid; rejected -> reopen -> draft
+pcxa pay-apps list --contract 5 --status draft -f table
+pcxa pay-apps create --contract 5 --period-start 2026-09-01 --period-end 2026-09-30
+pcxa pay-apps get 8 --contract 5 -f table          # G702 summary + G703 lines
+pcxa pay-apps lines list 8 --contract 5 -f table
+pcxa pay-apps lines update 8 40 --contract 5 --current 5000.00 --stored 0.00
+pcxa pay-apps update 8 --contract 5 --notes "September billing"
+pcxa pay-apps submit 8 --contract 5
+pcxa pay-apps approve 8 --contract 5               # also locks the period's timesheets
+pcxa pay-apps reject 8 --contract 5 --reason "Wrong period"
+pcxa pay-apps reopen 8 --contract 5
+pcxa pay-apps mark-paid 8 --contract 5
+pcxa pay-apps delete 8 --contract 5                # draft only
+
+# Change orders (amount: positive adds, negative deducts)
+pcxa change-orders list --contract 5 --status proposed -f table
+pcxa change-orders create --contract 5 --description "Owner credit" --amount -1500.00
+pcxa change-orders update 3 --contract 5 --amount 2000.00
+pcxa change-orders approve 3 --contract 5          # recomputes the contract's revised amount
+pcxa change-orders delete 3 --contract 5           # not once approved
+```
+
+Gotchas:
+- Money flags are sent as the decimal string you type (`"25000.00"`), never floats; `12,000` is rejected.
+- Contract `status` is read-only and there is no activate endpoint: a new contract stays `draft`.
+  Creating a pay application or change order needs an `active` contract, so set status in the web
+  UI/admin first or the server answers 400.
+- Pay application create reads only the period; the server numbers it and fills its line items
+  (fixed price from the SOV, T&M from approved timesheets). Line items are edited, not created.
+- Editing is draft-only: pay apps and their lines once submitted, SOV items once a non-draft pay
+  app uses them, change orders once approved/rejected, contracts once completed/cancelled.
+- No change-order reject, SOV reorder/bulk import, or PDF/XLSX export endpoint exists.
+- Writes honour `--dry-run`; `--data '{...}'` merges extra serializer fields last.
+
+## Members, permissions, team and company settings
+
+The web UI's project **Members** and **Permissions** screens (`members`, `groups`), the
+company **Team** page (`team`), **Settings** (`company`, `permission-templates`),
+**Programs**, the notification bell (`notifications`) and the **Needs you** panel (`needs-you`).
+`team`, `permission-templates`, `company`, `programs`, `notifications` and `needs-you` are
+company-level: they need no project and accept `--company ID`.
+
+```bash
+# Project members (ids are MEMBERSHIP ids; `pcxa project members` still maps name -> user id)
+pcxa members list --search carmen -f table
+pcxa members add --user 412 --role "Foreman" --groups 4,5     # user must already be a company member
+pcxa members update 881 --role "Superintendent" --admin true
+pcxa members remove 881                                       # the project owner cannot be removed
+pcxa members access                 # every member's groups + access counts
+pcxa members access 412             # one USER id: full detail
+pcxa members resource-access        # company custom objects/activity types/forms enabled here
+
+# Permission groups (project) + their members and rules
+pcxa groups list -f table
+pcxa groups create --name "Field crew" [--template 2]       # --template links a company template (0 unlinks)
+pcxa groups members list 9
+pcxa groups members add 9 --user 412                          # user must be a project member
+pcxa groups members remove 9 300                              # 300 = group-membership id from `list`
+pcxa groups rules create 9 --type photo --value all --level 1
+pcxa groups rules create 9 --type activity_type --resource-id 33 --level 2
+pcxa groups rules update 9 5 --level 3 ; pcxa groups rules delete 9 5
+
+# Company team + invitations
+pcxa team list --admin true -f table
+pcxa team update 15 --ai-access true --role "Estimator"       # 15 = company membership id
+pcxa --dry-run team invite --email new.hire@client.com --project-id 7 --project-role QA --groups 4
+pcxa team invitations list --status pending
+pcxa team invitations resend 8 ; pcxa team invitations revoke 8
+
+# Permission templates (company) + rules (same flags as group rules)
+pcxa permission-templates list [--active false]               # default: active only
+pcxa permission-templates create --name "Viewer"
+pcxa permission-templates rules create 2 --type file --value all --level 1
+pcxa permission-templates delete 2                            # archives (is_active=false)
+
+# Company, programs
+pcxa company get ; pcxa company security-policy ; pcxa company sso
+pcxa company update --website https://acme.com --data '{"ai_settings": {}}'
+pcxa programs list --archived false -f table
+pcxa programs create --name "North region" --code PGM01
+
+# Notifications + Needs you
+pcxa notifications list --unread -f table
+pcxa notifications unread-count
+pcxa notifications mark-read 55 ; pcxa notifications mark-all-read [--project-id 7]
+pcxa needs-you list -f table
+```
+
+Gotchas:
+- **`team invite` emails the invitee.** `--email` is required; preview with `--dry-run` first.
+  Inviting an address with a pending invitation re-sends it (and updates its project grant).
+  `--groups` requires `--project-id` and is rejected with `--project-admin`.
+- Membership ids differ from user ids: `members update/remove` and `team update/remove` take
+  the membership `id`; `members add --user`, `groups members add --user`, `members access` take user ids.
+- Rules need `--type`, `--level` (0 Disabled, 1 Read, 2 Edit, 3 Admin) and exactly one of
+  `--resource-id` (activity_type, form_template) or `--value` (`all` for photo/file/drawing_filter/
+  resource/timesheet/invoice/members, a form_type value, or `*` for activity_type/form_type/form_template).
+  Rules on a group linked to a template are read-only: unlink (`groups update 9 --template 0`) or edit the template.
+- Writes to groups, templates, team and company need project/company admin rights; a plain member gets 403.
+- `company sso` and `company security-policy` are read only here; `client_secret` is never returned.
+- `needs-you` refuses agent credentials (human logins only).
+
+## Workflows, statuses, automations, exports, extraction, saved views
+
+Web UI: the form template's workflow tab and a submission's approval panel
+(`workflows`), the status badge and revision history on a submission
+(`submission-statuses`, `revisions`), Automations (`automations`), the "Recent
+exports" dialogs on grids and Files (`exports`, `file-exports`,
+`folder-downloads`), AI jobs (`extraction`) and every grid's saved-view picker (`views`).
+
+```bash
+# Approval workflows: templates + stages are COMPANY-level; instances are per project
+pcxa workflows templates --active true
+pcxa workflows template-create --name "Daily report approval" --auto-apply-forms 8 \
+  --stages '[{"name":"PM review","assignment_type":"specific_user","assigned_user_id":12},
+             {"name":"Submitter fixes","assignment_type":"submitter"}]'
+pcxa workflows stage-create 4 --name "Owner sign-off" --order 2 --assignment-type specific_user --assigned-user 15
+pcxa workflows stage-reorder 4 --order 6,5,7
+pcxa workflows template-version 4          # edit a template already in use without touching running instances
+pcxa workflows list --status in_progress   # or --submission 33 / --template 4
+pcxa workflows stage-instances 9           # gives the stage_instance_id for decisions
+pcxa workflows approve 9 21 --comments "OK"
+pcxa workflows request-changes 9 21 --comments "Missing photos"   # comments usually required
+pcxa workflows cancel 9 --reason "Duplicate"; pcxa workflows restart 9; pcxa workflows history 9
+
+# Submission statuses (company) and revisions (read-only, by submission id)
+pcxa submission-statuses list --phase submitted
+pcxa submission-statuses create --name "In Review" --key in_review --phase submitted --color blue
+pcxa revisions list 33
+pcxa revisions compare 33 --a 0 --b 2      # revision NUMBERS, not ids
+
+# Automations (company; --project on list only filters)
+pcxa automations list --active true
+pcxa automations create --name "Notify on overdue" --target-model Activity --trigger on_field_change \
+  --data '{"field_change_config":{"field":"status"}}' --actions '[{"type":"notify","recipients":["assignee"]}]'
+pcxa automations disable 5
+pcxa automations executions --rule 5 --status failed; pcxa automations execution 88
+
+# Exports: create -> poll get until status=completed -> download
+pcxa exports create --type activities_table --name "Week 43" --ids 101,102,103
+pcxa exports get 11; pcxa exports download 11 --out week43.pdf
+pcxa exports presets --report-type activities_table
+pcxa file-exports create --type csv --filters '{"folder":12}'; pcxa file-exports download 6 -o files.csv
+pcxa folder-downloads preflight --folder 12     # size/caps/requires_reason; starts nothing
+pcxa folder-downloads create --folder 12 --reason "Handover"
+pcxa folder-downloads get 4                     # lists parts (ZIP volumes) with ids
+pcxa folder-downloads download 4 --part 31 -o vol1.zip; pcxa folder-downloads download 4 --manifest
+
+# AI extraction (project)
+pcxa extraction profiles; pcxa extraction profile-create --name Invoices --prompt "Extract totals"
+pcxa extraction job-create --name "Oct invoices" --form 8 --files 501,502
+pcxa extraction job-create --name "Tags" --output-mode field_extraction --profile 3 --photos 9,10
+pcxa extraction jobs --status pending,processing; pcxa extraction job-cancel 21
+
+# Saved grid views (generic-views); project lists also include company-wide views
+pcxa views list --target-context activities
+pcxa views create --name "Late items" --target-component data-grid --target-context activities \
+  --view-state '{"filters":[]}' --shared true --scope company
+pcxa location-fields list                       # read-only
+```
+
+Gotchas:
+- `submission-statuses` and `automations` are company-only (accept `--company`, need no project).
+- Workflow decisions are refused for agent credentials (server-side); a person's token is required.
+- Stage instances are created by the workflow engine; there is no create.
+- Exports, file exports and folder downloads list only YOUR jobs. `download` on an
+  unfinished job is a 400/409 from the API. The signed URL lives ~120s and is never printed.
+- Folder downloads fetch one part per call by design: each fetch is re-authorized and audited.
+- `extraction job-create` needs exactly one of `--files/--photos/--drawings`, and `--form`
+  for the default `form_submission` mode. Server may 403 on AI quota/budget.
+- `location-fields` has no write endpoint: the flag is `is_location_field` on the field definition.
+- `--data '{...}'` on create/update merges last and wins over typed flags.
+
+## Anything else: `pcxa api`
+
+When the web UI does something no command covers, call the route directly with
+the CLI's auth (JWT refresh, `--timeout`, edge-block and Terms diagnostics
+included) instead of writing an HTTP client:
+
+```bash
+pcxa api GET activities/12/                              # relative = current project
+pcxa api GET activities/ -q activity_type=170 -q page_size=100
+pcxa api GET cost-codes/ --company-level                 # /api/companies/{c}/...
+pcxa api GET /api/notifications/ -q company=4            # absolute path
+pcxa api PATCH activities/12/archive/ --dry-run          # writes honour --dry-run
+pcxa api POST dependencies/ -d '{"predecessor":1,"successor":2,"dependency_type":"FS","lag_days":0}'
+pcxa api POST activities/ --data-file body.json
+```
+
+Routes live in pcxa's `api/backend/nested_urls.py`. Prefer a dedicated command
+when one exists: it validates input and formats output.
+
 ## Reporting API errors
 
 When a PCXa CLI command returns a non-2xx API response, surface the endpoint, status code, and response body to the user. Do not invent alternate data paths; ask the user how they want to proceed.
+
+Two errors carry their own diagnosis:
+- **`Blocked at the edge: Cloudflare blocked this request…`** — the request never reached PCXA. For a JSON body (create/update/comment) a WAF rule matched the text: a description, outcome or comment quoting shell or SQL (`python -c "import …"`, `DROP TABLE`) is the usual trigger. Rephrase that text, or put it in a file and attach it, then retry. Retrying unchanged fails identically.
+- **`PCXA's Terms of Service … must be accepted`** — the account has not accepted the current Terms. Give the user the printed URL; never try to accept on their behalf.
 
 ## Invocation
 
