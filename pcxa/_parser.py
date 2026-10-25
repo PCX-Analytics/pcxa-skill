@@ -33,6 +33,11 @@ from pcxa.commands.ocr import (
     MAX_PAGES_PER_FILE as OCR_MAX_PAGES_PER_FILE,
 )
 from pcxa.commands.tags_folders import DELETION_TAG
+from pcxa.commands import admin, invoicing, media, schedule, templates, workflows
+
+# Command modules that own their parser and dispatch tables (register_parser,
+# SUB_HANDLERS, SUB_COMMAND_KEYS, COMPANY_ONLY). _main merges their tables.
+EXTENSION_MODULES = [admin, invoicing, media, schedule, templates, workflows]
 
 
 _HTTP_TIMEOUT_HELP = (
@@ -781,6 +786,7 @@ def build_parser():
     p.add_argument("--custom-fields", dest="custom_fields",
                    help="Custom-field values JSON keyed by custom-field id or label")
     act_sub.add_parser("types", help="List activity types")
+    schedule.register_activities_parser(act_sub)
 
     p = act_sub.add_parser(
         "related",
@@ -1535,6 +1541,9 @@ def build_parser():
     p.add_argument("--data-file", dest="data_file", help="Read the JSON request body from a file")
     p.add_argument("--company-level", dest="company_level", action="store_true",
                    help="Resolve PATH against /api/companies/{company}/ instead of the project")
+
+    for module in EXTENSION_MODULES:
+        module.register_parser(sub)
 
     _propagate_format_to_subparsers(parser)
     _propagate_dry_run_to_subparsers(parser)

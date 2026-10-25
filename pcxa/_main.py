@@ -19,7 +19,8 @@ from pcxa._http import (
     requests,
     set_default_timeout,
 )
-from pcxa._parser import build_parser
+from pcxa._parser import EXTENSION_MODULES, build_parser
+from pcxa.commands.schedule import ACTIVITIES_HANDLERS
 from pcxa._resolve import resolve_ids
 from pcxa._update import _check_for_update, _print_update_notice
 
@@ -338,6 +339,13 @@ SUB_COMMAND_KEYS = {
     "chat": "chat_command",
     "audit": "audit_command",
 }
+
+
+SUB_HANDLERS["activities"].update(ACTIVITIES_HANDLERS)
+for _module in EXTENSION_MODULES:
+    SUB_HANDLERS.update(_module.SUB_HANDLERS)
+    SUB_COMMAND_KEYS.update(_module.SUB_COMMAND_KEYS)
+    COMPANY_ONLY |= _module.COMPANY_ONLY
 
 
 def main():
