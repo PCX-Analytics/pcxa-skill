@@ -12,7 +12,13 @@ import sys
 
 from pcxa._api import APIClient
 from pcxa._config import get_profile, load_config
-from pcxa._http import EdgeBlockedError, describe_edge_block, requests, set_default_timeout
+from pcxa._http import (
+    EdgeBlockedError,
+    describe_edge_block,
+    edge_block_hint,
+    requests,
+    set_default_timeout,
+)
 from pcxa._parser import build_parser
 from pcxa._resolve import resolve_ids
 from pcxa._update import _check_for_update, _print_update_notice
@@ -185,6 +191,7 @@ from pcxa.commands.links import (
     cmd_links_list,
 )
 from pcxa.commands.audit import cmd_audit_history, cmd_audit_list
+from pcxa.commands.api_raw import cmd_api
 from pcxa.commands.tags_folders import DELETION_TAG  # noqa: F401  (re-export for legacy callers)
 from pcxa._update import cmd_update
 
@@ -202,6 +209,7 @@ HANDLERS = {
     "categorize": cmd_categorize,
     "gantt": cmd_gantt,
     "tree": cmd_tree,
+    "api": cmd_api,
 }
 
 
@@ -385,12 +393,13 @@ def main():
     profile_name = args.profile or config.get("default_profile")
     _, profile = get_profile(config, profile_name)
     client = APIClient(profile, profile_name, config, timeout=http_timeout)
-    company_only = args.command in COMPANY_ONLY
+    company_only = args.command in COMPANY_ONLY or getattr(args, "company_level", False)
     if company_only and getattr(args, "company", None):
         client.company_id = args.company
-    resolve_ids(client, need_project=not company_only)
-
     try:
+        # Inside the try: resolving ids is the first API call, so a Terms gate
+        # or an edge block surfaces here with the same diagnosis as any other.
+        resolve_ids(client, need_project=not company_only)
         # A handler may return an int exit code; anything else (the common case —
         # commands that just print) leaves the exit status at 0. Needed because a
         # long-running bulk command that partially fails must not report success
@@ -415,19 +424,29 @@ def main():
         # Printing the interstitial's HTML here reads as a permissions problem,
         # which costs hours of misdiagnosis; print the diagnosis instead.
         print(f"Blocked at the edge: {describe_edge_block(e.response)}", file=sys.stderr)
-        print(
-            "The request never reached PCXA. If this is an upload, the file's "
-            "bytes matched a WAF signature; report the filename on "
-            "https://github.com/PCX-Analytics/pcxa-skill/issues",
-            file=sys.stderr,
-        )
+        print(edge_block_hint(e.response), file=sys.stderr)
         sys.exit(1)
     except requests.HTTPError as e:
         print(f"API error: {e}", file=sys.stderr)
         if e.response is not None:
             try:
-                print(json.dumps(e.response.json(), indent=2), file=sys.stderr)
+                body = e.response.json()
             except Exception:
+                body = None
+            if isinstance(body, dict) and body.get("code") == "TERMS_ACCEPTANCE_REQUIRED":
+                # api/accounts/legal.py: new Terms gate every API call until
+                # accepted. Acceptance is a legal act, so the CLI only points.
+                frontend = (client.profile.get("frontend_url") or "https://www.pcxa.app").rstrip("/")
+                print(
+                    f"PCXA's Terms of Service (version {body.get('current_version', '?')}) "
+                    f"must be accepted before the API will answer. Accept them in a "
+                    f"browser at {frontend}{body.get('accept_url', '/auth/accept-terms')}, "
+                    "then retry.",
+                    file=sys.stderr,
+                )
+            elif body is not None:
+                print(json.dumps(body, indent=2), file=sys.stderr)
+            else:
                 print(e.response.text[:500], file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:

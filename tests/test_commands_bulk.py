@@ -36,6 +36,7 @@ class FakeClient:
         self.posts = []
         self.deletes = []
         self.gets = []
+        self.patches = []
         self.response = response or {"success_count": 0, "error_count": 0,
                                      "errors": [], "chunks": 0}
 
@@ -60,6 +61,10 @@ class FakeClient:
 
     def delete(self, path, json_data=None, project_scoped=True):
         self.deletes.append({"path": path, "json_data": json_data})
+        return self.response
+
+    def patch(self, path, payload=None, project_scoped=True):
+        self.patches.append({"path": path, "payload": payload})
         return self.response
 
 
@@ -254,14 +259,61 @@ def test_gantt_hits_gantt_data_endpoint():
     assert c.gets == [{"path": "activities/gantt_data/", "params": {}}]
 
 
-def test_activities_bulk_update_sends_updates_payload():
-    c = FakeClient({"success_count": 3})
-    cmd_activities_bulk_update(c, _args(activity_ids=[1, 2, 3], status="done",
-                                         priority=1, owner="alice"))
-    call = c.bulk_calls[0]
+def test_activities_bulk_update_sends_one_row_per_activity():
+    """The server validates ``updates`` as a list of {id, fields} rows.
+
+    A single dict under ``updates`` (the old payload) fails that serializer
+    with "Expected a list", so every id 400s.
+    """
+    c = FakeClient({"success_count": 3, "error_count": 0, "errors": []})
+    cmd_activities_bulk_update(c, _args(activity_ids=[1, 2, 3], status="completed",
+                                         owner=7, custom_fields=None))
+    assert c.bulk_calls == []
+    assert len(c.patches) == 1
+    call = c.patches[0]
     assert call["path"] == "activities/bulk_update/"
-    # Server exposes this action as PATCH, not POST (POST → 405).
-    assert call["method"] == "PATCH"
-    assert call["base_payload"] == {
-        "updates": {"status": "done", "priority": 1, "owner": "alice"}
-    }
+    fields = {"status": "completed", "owner": 7}
+    assert call["payload"] == {"updates": [{"id": i, "fields": fields} for i in (1, 2, 3)]}
+
+
+def test_activities_bulk_update_chunks_and_aggregates():
+    from pcxa.commands.activities import BULK_UPDATE_CHUNK
+    c = FakeClient({"success_count": 1, "error_count": 0, "errors": []})
+    ids = list(range(1, BULK_UPDATE_CHUNK + 3))
+    out = []
+    cmd_activities_bulk_update(c, _args(activity_ids=ids, status="in_progress",
+                                         owner=None, custom_fields=None, format="json"))
+    assert [len(p["payload"]["updates"]) for p in c.patches] == [BULK_UPDATE_CHUNK, 2]
+
+
+def test_activities_bulk_update_sends_outcome_and_custom_fields():
+    c = FakeClient({"success_count": 2})
+    cmd_activities_bulk_update(c, _args(activity_ids=[4, 5], status=None, owner=None,
+                                         outcome="", custom_fields='{"Size": "M"}'))
+    fields = c.patches[0]["payload"]["updates"][0]["fields"]
+    assert fields == {"outcome": "", "custom_field_data": {"Size": "M"}}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# deps create / activities create --status
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_deps_create_always_sends_lag_days():
+    """lag_days is a required serializer field: omitting it 400s."""
+    from pcxa._parser import build_parser
+    from pcxa.commands.activities import cmd_deps_create
+    args = build_parser().parse_args(["deps", "create", "--predecessor", "1", "--successor", "2"])
+    c = FakeClient({"id": 9})
+    cmd_deps_create(c, args)
+    assert c.posts[0]["payload"]["lag_days"] == 0
+
+
+def test_activities_create_patches_status_the_create_dropped():
+    from pcxa._parser import build_parser
+    from pcxa.commands.activities import cmd_activities_create
+    args = build_parser().parse_args(["activities", "create", "--title", "T",
+                                      "--status", "in_progress"])
+    c = FakeClient({"id": 5, "title": "T", "status": "not_started"})
+    c.project_id = 1
+    cmd_activities_create(c, args)
+    assert c.patches == [{"path": "activities/5/", "payload": {"status": "in_progress"}}]

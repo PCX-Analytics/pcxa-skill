@@ -16,7 +16,7 @@ def resolve_member_by_name(client, query):
     Returns (user_id, message) where message describes the match outcome.
     On ambiguity or no match, user_id is None and message explains next steps.
     """
-    data = client.get("memberships/", {"limit": 200})
+    data = client.get("memberships/", {"page_size": 1000})
     results = data.get("results", data) if isinstance(data, dict) else data
     members = [m for m in results if not m.get("is_ai_agent")]
     if not members:

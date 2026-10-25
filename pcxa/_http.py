@@ -97,6 +97,37 @@ def describe_edge_block(response):
     return detail
 
 
+def edge_block_hint(response):
+    """What to do about an edge block, by what kind of request tripped it.
+
+    A JSON body is matched like any other text: an activity description or a
+    comment quoting shell or SQL (`python -c "import os"`, `DROP TABLE`) trips
+    the same managed rules that #1946 hit inside PDF bytes.
+    """
+    kind = getattr(response, "request_kind", None)
+    method = getattr(response, "request_method", None)
+    size = getattr(response, "request_bytes", None)
+    sent = f"{method} with a {size}-byte {kind} body" if method and kind else None
+    if kind == "json":
+        return (
+            f"The request never reached PCXA ({sent}). A WAF rule matched text in "
+            "the payload — typically a description, outcome or comment containing "
+            "shell or SQL-like text such as `python -c \"import ...\"`. Rephrase that "
+            "text (or put it in a file and attach the file), then retry."
+        )
+    if kind == "upload":
+        return (
+            f"The request never reached PCXA ({sent}). The file's bytes matched a "
+            "WAF signature; report the filename on "
+            "https://github.com/PCX-Analytics/pcxa-skill/issues"
+        )
+    return (
+        "The request never reached PCXA. If it carried text or a file, a WAF "
+        "rule matched its content; report it on "
+        "https://github.com/PCX-Analytics/pcxa-skill/issues"
+    )
+
+
 class ConnectionError(Exception):
     """Raised when a network connection cannot be established."""
 
@@ -553,10 +584,16 @@ def _request_stdlib(method, url, *, headers=None, params=None, json=None, data=N
     for attempt in range(2):
         conn, was_reused = _acquire_conn(parsed.scheme, host, port, proxy_url, timeout)
         try:
-            return _do_request(
+            resp = _do_request(
                 conn, was_reused, method.upper(), request_target, body,
                 request_headers, stream, url, pool_key_args,
             )
+            # What was sent, so an edge block can say which kind of payload a
+            # WAF rule matched (describe_edge_block) without echoing the body.
+            resp.request_method = method.upper()
+            resp.request_kind = "json" if json is not None else ("upload" if body is not None else None)
+            resp.request_bytes = length if body is not None else 0
+            return resp
         except (http.client.RemoteDisconnected, http.client.BadStatusLine,
                 ConnectionResetError, BrokenPipeError) as exc:
             try:

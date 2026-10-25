@@ -20,6 +20,9 @@ from pcxa.commands.chunks import (
 from pcxa.commands.chunks import (
     DEFAULT_CHUNKS_PER_HOUR as CHUNK_DEFAULT_PER_HOUR,
 )
+from pcxa.commands.chunks import (
+    DEFAULT_MAX_BYTES as CHUNK_DEFAULT_MAX_BYTES,
+)
 from pcxa.commands.ocr import (
     DEFAULT_MAX_BYTES as OCR_DEFAULT_MAX_BYTES,
 )
@@ -141,14 +144,11 @@ def build_parser():
     p.add_argument("--folder", type=int, help="Folder ID")
     p.add_argument("--category", help="Category")
     p.add_argument("--search", "-s", help="Title search (trigram fuzzy by default; exact matches rank first)")
-    p.add_argument("--content", help="Literal substring search of file BODY/contents — exhaustive + countable "
-                                     "(unlike the ranked, 50-capped `files search`). Finds files by what's inside "
-                                     "them even when the filename doesn't match; count:0 means genuinely not located.")
+    p.add_argument("--content", help="RETIRED (pcxa v1.1.24, pcxa#3850): exits 2 with a pointer to `files search`")
     p.add_argument("--exact", action="store_true",
                    help="Tighten title matching (drop fuzzy/typo tolerance). NOT a literal phrase "
                         "match — words are AND-matched separately, so 'Case Memo' also matches "
-                        "'Case Assessment Memorandum'. For a true literal phrase use: "
-                        "pcxa files query 'title:\"Case Memo\"'")
+                        "'Case Assessment Memorandum'.")
     p.add_argument("--index-status", choices=["indexed", "pending", "processing", "failed"])
     # Default is None (not "-created_at") so fuzzy search can rank by
     # similarity DESC. When --search is absent we fall back to -created_at
@@ -178,26 +178,11 @@ def build_parser():
 
     p = files_sub.add_parser(
         "query",
-        help="BOOLEAN file search — AND/OR/NOT, grouping, field scoping, phrases. "
-             "NOTE: two or more content terms joined by AND currently match only within the "
-             "same passage of a file, so the result UNDER-REPORTS — treat the count as a floor",
+        help="RETIRED (pcxa v1.1.24, pcxa#3850): boolean search is gone; exits 2 with a "
+             "pointer to `files search`",
     )
-    p.add_argument("query",
-                   help='Boolean expression, e.g. \'title:report AND (delay OR "change order")\'. '
-                        'Fields: title (alias name), content. Bare terms search content. '
-                        'Operators are UPPERCASE. Quote a term to match it as an adjacent phrase.')
-    p.add_argument("--ext", help="File type filter (csv, e.g. PDF,DOCX)")
-    p.add_argument("--folder", type=int, help="Folder ID (includes subtree)")
-    p.add_argument("--doc-date-from", dest="doc_date_from",
-                   help="Document's own extracted date >= YYYY-MM-DD. NOTE: files the "
-                        "extractor could not date are EXCLUDED by this filter.")
-    p.add_argument("--doc-date-to", dest="doc_date_to", help="Document's own extracted date <= YYYY-MM-DD")
-    p.add_argument("--created-from", dest="created_from", help="Upload date >= YYYY-MM-DD")
-    p.add_argument("--created-to", dest="created_to", help="Upload date <= YYYY-MM-DD (inclusive)")
-    p.add_argument("--count-only", action="store_true",
-                   help="Return only the match count (exact unless the ceiling is hit)")
-    p.add_argument("--limit", type=int, default=25, help="Rows per page (default 25, max 200)")
-    p.add_argument("--offset", type=int, default=0, help="Skip N rows")
+    # Swallow the old flags so callers get the retirement message, not a usage error.
+    p.add_argument("query_args", nargs=argparse.REMAINDER)
 
     p = files_sub.add_parser(
         "content",
@@ -294,10 +279,11 @@ def build_parser():
             "  3    partial: some files errored, were unrecognized by the server,\n"
             "       or were not attempted\n"
             "  4    aborted: --max-failures budget exhausted\n"
+            "  130  interrupted (Ctrl-C): progress saved, re-run to resume\n"
             "\n"
             "The summary satisfies\n"
             "  created + duplicate + error + unrecognized + not_attempted == to_upload\n"
-            "(a Ctrl-C'd run exits 3, with the files it never reached as not_attempted)"
+            "(a Ctrl-C'd run exits 130, with the files it never reached as not_attempted)"
         ),
     )
     p.add_argument("input_dir", help="Local directory to mirror")
@@ -430,6 +416,10 @@ def build_parser():
                    help="Files per request (default/server max: 50).")
     p.add_argument("--chunks-per-request", dest="chunks_per_request", type=int, default=5000,
                    help="Chunks per request (default/server max: 5000).")
+    p.add_argument("--max-bytes", dest="max_bytes", type=int, default=CHUNK_DEFAULT_MAX_BYTES,
+                   help=f"Request body budget in bytes (default: {CHUNK_DEFAULT_MAX_BYTES:,}; server "
+                        "cap 128 MiB). Batches are packed by bytes as well as count; a 413 splits "
+                        "the batch and retries.")
     p.add_argument("--limit", type=int, default=0,
                    help="Stop after queueing N files. Useful for graduated smoke tests. "
                         "0 = no limit (default).")
@@ -698,8 +688,17 @@ def build_parser():
     # See cmd_activities_list — None lets --search rank by similarity DESC.
     p.add_argument("--sort", default=None,
                    help="Sort field (default: -created_at; similarity when --search)")
+    p.add_argument("--leaves-only", dest="leaves_only", action="store_true",
+                   help="Hide summary activities (those with children), as the web grid's flat "
+                        "view does. Default: every activity, Releases and Work Packages included")
+    arch = p.add_mutually_exclusive_group()
+    arch.add_argument("--include-archived", dest="archived", action="store_const", const="include",
+                      default="exclude", help="Archived activities too (hidden by default)")
+    arch.add_argument("--archived-only", dest="archived", action="store_const", const="only",
+                      help="Only archived activities")
     p.add_argument("--count-only", action="store_true")
-    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--limit", type=int, default=50,
+                   help="Rows to return (default 50); above 1000 the CLI pages for you")
     p.add_argument("--offset", type=int, default=0)
 
     p = act_sub.add_parser("get", help="Activity detail")
@@ -723,11 +722,15 @@ def build_parser():
     p.add_argument("--parent", type=int)
     p.add_argument("--tags")
     p.add_argument("--wbs")
+    p.add_argument("--code", help="The activity's own WBS segment code (its full wbs_code is derived)")
     p.add_argument("--custom-fields", dest="custom_fields",
                    help='Custom-field values JSON keyed by custom-field id '
                         '(e.g. \'{"3":"Acme Corp"}\'); custom-object-backed values are fuzzy-validated')
     p.add_argument("--no-fuzzy", dest="no_fuzzy", action="store_true",
                    help="Skip fuzzy validation of custom-object field values (write as-is)")
+    p.add_argument("--field", action="append", metavar="LABEL=VALUE",
+                   help="Set a custom field by its label (repeatable); LABEL= clears it. "
+                        "Resolved against the activity type's fields")
 
     p = act_sub.add_parser("update", help="Update activity")
     p.add_argument("activity_id", type=int)
@@ -749,26 +752,34 @@ def build_parser():
     p.add_argument("--assignees")
     p.add_argument("--parent", type=int, help="0=root")
     p.add_argument("--tags")
+    p.add_argument("--code", help="The activity's own WBS segment code; \"\" clears it")
     p.add_argument("--custom-fields", dest="custom_fields",
                    help='Custom-field values JSON keyed by custom-field id, merged into the '
                         "activity's current values; null clears one "
                         '(custom-object-backed values are fuzzy-validated)')
     p.add_argument("--no-fuzzy", dest="no_fuzzy", action="store_true",
                    help="Skip fuzzy validation of custom-object field values (write as-is)")
+    p.add_argument("--field", action="append", metavar="LABEL=VALUE",
+                   help="Set a custom field by its label (repeatable); LABEL= clears it. "
+                        "Resolved against the activity type's fields")
 
     p = act_sub.add_parser("delete", help="Delete activities")
     p.add_argument("activity_ids", nargs="+", type=int)
 
     p = act_sub.add_parser("bulk-update", help="Bulk update activities")
     p.add_argument("activity_ids", nargs="+", type=int)
-    p.add_argument("--status")
-    p.add_argument("--priority", type=int)
+    # Flags mirror ActivityBulkUpdateSerializer.validate_fields' allow-list;
+    # anything else (e.g. priority) 400s for every id.
+    p.add_argument("--status", choices=["not_started", "in_progress", "completed"])
     p.add_argument("--owner", type=int)
-    # No --outcome here on purpose. ActivityBulkUpdateSerializer.validate_fields
-    # takes an explicit allow-list that does not include `outcome`, so the flag
-    # would parse locally and then 400 for every id. Adding it needs the server
-    # field added first — an outcome is also per-activity by definition, so one
-    # text applied across a selection is rarely what anyone means.
+    p.add_argument("--assigned-to", dest="assigned_to", type=int)
+    p.add_argument("--percent", type=int, help="percent_complete, 0-100")
+    p.add_argument("--due-date")
+    p.add_argument("--type", type=int, help="Activity type ID")
+    p.add_argument("--outcome", help="Same outcome text on every selected activity")
+    p.add_argument("--tags", help="Comma-separated; replaces each activity's tags")
+    p.add_argument("--custom-fields", dest="custom_fields",
+                   help="Custom-field values JSON keyed by custom-field id or label")
     act_sub.add_parser("types", help="List activity types")
 
     p = act_sub.add_parser(
@@ -842,7 +853,7 @@ def build_parser():
     p.add_argument("--predecessor", type=int, required=True)
     p.add_argument("--successor", type=int, required=True)
     p.add_argument("--type", dest="dep_type", choices=["FS", "SS", "FF", "SF"], default="FS")
-    p.add_argument("--lag", type=float)
+    p.add_argument("--lag", type=float, default=0, help="Lag in days (default: 0)")
     p.add_argument("--notes")
 
     p = deps_sub.add_parser("delete", help="Delete dependency")
@@ -1508,6 +1519,22 @@ def build_parser():
                    help="Resource type (default: file.File, which also covers folder downloads that included it)")
     p.add_argument("--csv", help="Write events to this CSV instead of printing them")
     p.add_argument("--company", type=int, help="Company ID (default: the profile/.pcxa company)")
+
+    # ── api (raw passthrough for anything without a dedicated command) ──
+    p = sub.add_parser(
+        "api", help="Call any PCXA REST route with the CLI's auth (escape hatch)",
+        description="Send one request to the PCXA API and print the JSON reply. PATH is "
+                    "relative to the current project (activities/12/), to the company with "
+                    "--company-level (cost-codes/), or absolute when it starts with /api/.",
+    )
+    p.add_argument("method", type=str.upper, choices=["GET", "POST", "PUT", "PATCH", "DELETE"])
+    p.add_argument("path", help="e.g. activities/12/ or /api/companies/3/projects/7/baselines/")
+    p.add_argument("--param", "-q", action="append", metavar="KEY=VALUE",
+                   help="Query parameter (repeatable; repeat a key to send a list)")
+    p.add_argument("--data", "-d", help="JSON request body")
+    p.add_argument("--data-file", dest="data_file", help="Read the JSON request body from a file")
+    p.add_argument("--company-level", dest="company_level", action="store_true",
+                   help="Resolve PATH against /api/companies/{company}/ instead of the project")
 
     _propagate_format_to_subparsers(parser)
     _propagate_dry_run_to_subparsers(parser)
