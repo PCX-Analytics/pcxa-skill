@@ -640,7 +640,7 @@ pcxa progress delete 123 789                                  # manual entries o
 
 ```bash
 pcxa comments list 3712                                       # list comments on activity
-pcxa comments add 3712 --content "[2026-03-16] Drafting initiated..."
+pcxa comments add 3712 --content "Drafting initiated..."
 pcxa comments delete 3712 2952                                # delete comment by ID
 pcxa comments bulk 3712 --file comments.json                  # bulk add from JSON file
 ```
@@ -648,8 +648,8 @@ pcxa comments bulk 3712 --file comments.json                  # bulk add from JS
 **Bulk JSON format** (`comments.json`):
 ```json
 [
-  {"content": "[2026-03-16] Drafting initiated per weekly report #12"},
-  {"content": "[2026-03-23] Internal review completed, minor revisions needed"}
+  {"content": "Drafting initiated per weekly report #12"},
+  {"content": "Internal review completed, minor revisions needed"}
 ]
 ```
 
