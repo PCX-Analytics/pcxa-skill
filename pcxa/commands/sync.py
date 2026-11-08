@@ -74,6 +74,15 @@ R2_PART_HEADROOM = 9500  # leave room so we never round up to 10001
 EXIT_OK = 0
 EXIT_PARTIAL = 3      # some files errored, were unrecognized or not attempted
 EXIT_ABORTED = 4      # stopped early: --max-failures budget exhausted
+EXIT_INTERRUPTED = 130  # stopped by Ctrl-C (SIGINT); progress flushed, re-run to resume (#28)
+
+
+class _StaleFolder(Exception):
+    """A folder id from the manifest checkpoint no longer exists server-side (#14)."""
+
+    def __init__(self, rel_dir):
+        super().__init__(rel_dir)
+        self.rel_dir = rel_dir
 
 
 class _NotAttempted(RuntimeError):
@@ -115,6 +124,8 @@ def _sync_exit_code(summary):
     """The exit status for a finished run, most severe reason first."""
     if summary.get("aborted_max_failures"):
         return EXIT_ABORTED
+    if summary.get("interrupted"):
+        return EXIT_INTERRUPTED
     if summary["error"] or summary["unrecognized"] or summary["not_attempted"]:
         return EXIT_PARTIAL
     return EXIT_OK
@@ -223,10 +234,15 @@ def cmd_files_sync(client, args):
     def _record_folder(rel_dir, folder_id):
         resolved_folders[rel_dir] = folder_id
 
+    def _forget_folders(rel_dirs_gone):
+        for rel_dir in rel_dirs_gone:
+            resolved_folders.pop(rel_dir, None)
+
     try:
         rel_dir_to_folder_id = _resolve_or_create_folders(
             client, rel_dirs, root_folder_id,
             known=known_folders, on_resolved=_record_folder,
+            on_stale=_forget_folders,
         )
     except Exception as exc:
         # Folder resolution runs before any upload, so a failure here used to
@@ -253,10 +269,12 @@ def cmd_files_sync(client, args):
             file=sys.stderr,
         )
         folder_to_existing = {fid: set() for fid in target_folder_ids}
+        listed_folders = set()
     else:
         print("Reading existing filenames in target folders...", file=sys.stderr)
         try:
             folder_to_existing = _fetch_existing_names(client, target_folder_ids)
+            listed_folders = set(folder_to_existing)
         except Exception as exc:
             print(
                 f"Warning: pre-flight name check failed ({exc}). "
@@ -265,6 +283,7 @@ def cmd_files_sync(client, args):
                 file=sys.stderr,
             )
             folder_to_existing = {fid: set() for fid in target_folder_ids}
+            listed_folders = set()
 
     work_items = []
     skipped_manifest = 0
@@ -275,11 +294,16 @@ def cmd_files_sync(client, args):
         e["folder_id"] = folder_id
         mf = manifest["files"].get(rel_path)
         if mf and mf.get("size") == e["size"] and mf.get("folder_id") == folder_id:
-            skipped_manifest += 1
-            continue
+            # Before #26 the name check matched on the stem alone, so an entry
+            # it wrote may hide a different format (report.docx skipped for an
+            # existing report.pdf). Re-check those against the listing when
+            # this run has one; otherwise trust the manifest as before.
+            if not (mf.get("skipped_reason") == "already_in_target_folder"
+                    and folder_id in listed_folders):
+                skipped_manifest += 1
+                continue
         existing = folder_to_existing.get(folder_id, set()) if folder_id else set()
-        candidates = {e["name"].lower(), e["stem"].lower()}
-        if existing & candidates:
+        if e["name"].lower() in existing:
             skipped_api += 1
             manifest["files"][rel_path] = {
                 "size": e["size"],
@@ -357,6 +381,9 @@ def cmd_files_sync(client, args):
         # holds on every path that prints a summary (#25).
         "not_attempted": 0,
         "aborted_max_failures": False,
+        # Ctrl-C: the operator stopped the run, so it wants resuming, not
+        # investigating -- a separate exit status from EXIT_PARTIAL (#28).
+        "interrupted": False,
         "concurrency_final": initial_concurrency,
     }
 
@@ -415,6 +442,8 @@ def cmd_files_sync(client, args):
                 f"({summary['failure_events']}/{max_failures} failure events).",
                 file=sys.stderr,
             )
+        if summary["interrupted"]:
+            print("  Interrupted: progress saved — re-run to resume.", file=sys.stderr)
         if summary["failures"]:
             print(f"\nFirst {min(10, len(summary['failures']))} failures:", file=sys.stderr)
             for f in summary["failures"][:10]:
@@ -447,7 +476,6 @@ def _collect_files(input_root, includes, excludes, skip_hidden):
             entries.append({
                 "abs_path": abs_path,
                 "name": name,
-                "stem": Path(name).stem,
                 "size": size,
                 "relative_dir": rel_dir,
                 "relative_path": rel_path,
@@ -570,7 +598,7 @@ def _create_folder_with_retry(client, name, parent_id, relookup):
 
 
 def _resolve_or_create_folders(client, rel_dirs, root_folder_id,
-                               known=None, on_resolved=None):
+                               known=None, on_resolved=None, on_stale=None):
     """Map each relative dir (POSIX-style) to a PCXA folder id.
 
     Walks the folder tree segment by segment, reusing existing folders by
@@ -582,6 +610,12 @@ def _resolve_or_create_folders(client, rel_dirs, root_folder_id,
     directories a previous run already resolved. ``on_resolved(rel_dir, id)``
     fires for each dir resolved this run, so the caller can checkpoint
     progress and still have something resumable if a later dir blows up.
+
+    A ``known`` id is unverified: the folder may have been deleted since the
+    run that checkpointed it. When listing or creating under one answers
+    400/404, that id and every checkpointed id below it are dropped
+    (``on_stale(rel_dirs)`` lets the caller drop them from the manifest) and
+    re-resolved, so a stale checkpoint costs a lookup, not the run (#14).
 
     Every call here goes through a retry with backoff — the whole reason
     this function is worth its own error handling is that it runs *before*
@@ -636,31 +670,61 @@ def _resolve_or_create_folders(client, rel_dirs, root_folder_id,
         children_cache[parent_id] = m
         return m
 
-    for rel_dir in rel_dirs:
-        if rel_dir in cache:
-            continue
+    unverified = {k for k in cache if k}
+
+    def _walk(rel_dir):
         segments = rel_dir.split("/")
         parent_id = root_folder_id
+        parent_key = ""
         running = []
         for seg in segments:
             running.append(seg)
             key = "/".join(running)
             if key in cache:
-                parent_id = cache[key]
+                parent_id, parent_key = cache[key], key
                 continue
             parent = parent_id
-            existing = _children_of(parent).get(seg.lower())
-            if existing is not None:
-                parent_id = existing
-            else:
-                def _relookup(_parent=parent, _seg=seg):
-                    return _children_of(_parent, refresh=True).get(_seg.lower())
+            try:
+                existing = _children_of(parent).get(seg.lower())
+                unverified.discard(parent_key)
+                if existing is not None:
+                    parent_id = existing
+                else:
+                    def _relookup(_parent=parent, _seg=seg):
+                        return _children_of(_parent, refresh=True).get(_seg.lower())
 
-                parent_id = _create_folder_with_retry(client, seg, parent, _relookup)
-                children_cache.setdefault(parent, {})[seg.lower()] = parent_id
+                    parent_id = _create_folder_with_retry(client, seg, parent, _relookup)
+                    children_cache.setdefault(parent, {})[seg.lower()] = parent_id
+            except _requests.HTTPError as exc:
+                status = getattr(exc.response, "status_code", 0)
+                if parent_key in unverified and status in (400, 404):
+                    raise _StaleFolder(parent_key) from exc
+                raise
             cache[key] = parent_id
+            parent_key = key
             if on_resolved is not None:
                 on_resolved(key, parent_id)
+
+    def _forget(stale_key):
+        gone = [k for k in cache if k == stale_key or k.startswith(stale_key + "/")]
+        for k in gone:
+            children_cache.pop(cache.pop(k), None)
+            unverified.discard(k)
+        print(f"  checkpointed folder {stale_key!r} no longer exists — dropping "
+              f"{len(gone)} checkpointed folder(s) and re-resolving", file=sys.stderr)
+        if on_stale is not None:
+            on_stale(gone)
+
+    # Repeat until every dir is mapped: a stale id found late also drops dirs
+    # an earlier pass had mapped from the checkpoint. Terminates because each
+    # _forget removes at least one unverified id.
+    while any(d not in cache for d in rel_dirs):
+        for rel_dir in rel_dirs:
+            while rel_dir not in cache:
+                try:
+                    _walk(rel_dir)
+                except _StaleFolder as exc:
+                    _forget(exc.rel_dir)
     return cache
 
 
@@ -687,15 +751,19 @@ def _fetch_one_folder_names(client, fid):
         data = resp.json()
         results = data.get("results", []) if isinstance(data, dict) else data
         for f in results:
+            # Full filenames only (#26). The server derives `title` from the
+            # stem, so a bare title or stem would match report.docx against an
+            # existing report.pdf. A title is matched with the extension of the
+            # file it names, which still recognises a file renamed in the UI.
             title = (f.get("title") or "").strip().lower()
-            if title:
-                names.add(title)
             cv = f.get("current_version") or {}
             meta = cv.get("file_metadata") or {}
             orig = (meta.get("original_filename") or "").strip().lower()
+            ext = Path(orig).suffix
             if orig:
                 names.add(orig)
-                names.add(Path(orig).stem.lower())
+            if title:
+                names.add(title if not ext or title.endswith(ext) else title + ext)
         if not (isinstance(data, dict) and data.get("next")):
             break
         page += 1
@@ -1749,6 +1817,7 @@ def _run_uploads(*, client, work_items, manifest, manifest_path, input_root,
                     _handle_completion(fut, entry)
     except KeyboardInterrupt:
         interrupted.set()
+        summary["interrupted"] = True
         _log_autotune("[interrupted] flushing partial progress...")
 
     interrupted.set()  # signal controller to stop

@@ -133,15 +133,12 @@ class TestOutcomeSurface:
         cmd_activities_get(c, SimpleNamespace(activity_id=7, format="table"))
         assert "Outcome:" not in capsys.readouterr().out
 
-    def test_bulk_update_does_not_offer_outcome(self):
-        """The server's bulk allow-list has no `outcome`, so the flag must not exist.
-
-        Offering it would parse locally and then 400 for every id in the
-        selection. If the backend adds the field, delete this test with the
-        change that adds the flag.
-        """
-        args = build_parser().parse_args(["activities", "bulk-update", "1", "2", "--status", "x"])
-        assert not hasattr(args, "outcome")
+    def test_bulk_update_offers_outcome(self):
+        """The server's bulk allow-list gained `outcome` (#2797, at pcxa
+        95addac48 api/activity/serializers.py ActivityBulkUpdateSerializer), so
+        the flag exists and `--outcome ""` clears it like `update` does."""
+        args = build_parser().parse_args(["activities", "bulk-update", "1", "2", "--outcome", ""])
+        assert args.outcome == ""
 
     def test_create_and_update_do_offer_outcome(self):
         p = build_parser()
