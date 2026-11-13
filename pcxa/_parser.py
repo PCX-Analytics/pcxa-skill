@@ -674,7 +674,7 @@ def build_parser():
     act_sub = act_p.add_subparsers(dest="activities_command")
 
     p = act_sub.add_parser("list", help="List activities")
-    p.add_argument("--status", help="not_started,in_progress,completed")
+    p.add_argument("--status", help="draft,not_started,in_progress,blocked,in_review,completed")
     p.add_argument("--priority", help="0-4 (comma-sep)")
     p.add_argument("--owner", help="Owner user ID")
     p.add_argument("--assignee", help="Assignee user ID")
@@ -712,7 +712,7 @@ def build_parser():
                    help="What the activity concluded or produced. Companion to "
                         "--description: description is the brief, outcome is the "
                         "result. Not production/quantity (that is --percent).")
-    p.add_argument("--status", choices=["not_started", "in_progress", "completed"])
+    p.add_argument("--status", choices=["draft", "not_started", "in_progress", "blocked", "in_review", "completed"])
     p.add_argument("--priority", type=int, choices=[0, 1, 2, 3, 4])
     p.add_argument("--due-date")
     p.add_argument("--planned-start")
@@ -737,7 +737,7 @@ def build_parser():
                    help="What the activity concluded or produced. Pass an empty "
                         'string (--outcome "") to clear it. Every revision is kept '
                         "in the activity's history.")
-    p.add_argument("--status", choices=["not_started", "in_progress", "completed"])
+    p.add_argument("--status", choices=["draft", "not_started", "in_progress", "blocked", "in_review", "completed"])
     p.add_argument("--priority", type=int, choices=[0, 1, 2, 3, 4])
     p.add_argument("--percent", type=int)
     p.add_argument("--due-date")
