@@ -169,12 +169,29 @@ The CLI is useful on its own too. All commands print JSON by default; pass
 
 ```bash
 pcxa whoami
-pcxa files search "structural defects" --include histogram,facets
+pcxa files search "structural defects" --ext PDF
 pcxa activities list --status in_progress -f table
 pcxa progress add 123 --percent 50 --notes "Reviewed shop drawings"
+pcxa activities update 123 --field "Size=M"            # custom field by label
+pcxa api GET baselines/                                # any route, with the CLI's auth
 ```
 
 Run `pcxa <command> --help` for the full option list.
+
+The CLI covers the web UI almost one to one. Beyond files, activities, forms,
+custom objects, resources, timesheets, links, chat and the audit log, it has
+`baselines`, `calendars`, `work-log`, `activity-types` / `type-steps` /
+`type-fields` (custom-field definitions), `photos`, `drawings`, `threads`
+(comments on files, photos, submissions and drawings), `contracts`, `sov`,
+`pay-apps`, `change-orders`, `members`, `groups`, `team`,
+`permission-templates`, `company`, `programs`, `notifications`, `needs-you`,
+`workflows`, `submission-statuses`, `revisions`, `automations`, `exports`,
+`file-exports`, `folder-downloads`, `extraction` and `views`. Whatever is left,
+`pcxa api METHOD PATH` reaches directly.
+
+`files query` and `files list --content` were retired with pcxa v1.1.24
+(PCX-Analytics/pcxa#3850, boolean and exhaustive body search removed); they
+exit 2 and point at `files search`.
 
 ### Timeouts on slow projects
 
@@ -203,8 +220,9 @@ Yes — from 0.8.0 the exit status says whether every file landed:
 | 0 | every file queued for upload is registered (created or duplicate) |
 | 1 | bad input or startup failure (path, target folder, folder resolution) |
 | 2 | fatal: authentication expired |
-| 3 | partial: some files errored, were unrecognized by the server, or were not attempted (including a Ctrl-C'd run) |
+| 3 | partial: some files errored, were unrecognized by the server, or were not attempted |
 | 4 | aborted: `--max-failures` budget exhausted |
+| 130 | interrupted (Ctrl-C): progress saved; re-run to resume (0.9.0+; was 3) |
 
 **Before 0.8.0 a sync with failed files exited 0.** A script that only checks
 for non-zero now sees partial runs as failures, which is the point.
@@ -261,6 +279,10 @@ Three things worth knowing before a large load:
   requests/minute.** It is client-side pacing, not a durability constraint: raise
   it, or pass `0` to disable it and upload as fast as the rate limit allows. 429s
   are retried honouring `Retry-After` either way.
+- **Requests stay under pcxa's 128 MiB body cap.** Batches are packed by
+  serialized bytes as well as count (`--max-bytes`, default 100 MiB); a single
+  file over the budget is reported by name and skipped, and a 413 splits the
+  batch in half and retries.
 - **You need project-admin or company-admin** on the target project. Chunk upload
   replaces a file's entire indexed content, so it takes the same gate as other
   bulk file operations.

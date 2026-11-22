@@ -25,8 +25,25 @@ def _file_row(f):
     }
 
 
+# pcxa retired its exhaustive body search (`content_contains`) and the boolean
+# endpoint together in v1.1.24 (PCX-Analytics/pcxa#3850). Keyword AND/OR/NOT now
+# rides the ranked Pinecone keyword leg of `semantic-search/search/`, which is
+# capped and uncounted — so nothing replaces "count every file containing X".
+RETIRED_BODY_SEARCH = (
+    "{what} was retired by pcxa v1.1.24 (PCX-Analytics/pcxa#3850): the server no "
+    "longer offers an exhaustive, countable search of file contents.\n"
+    "Use `pcxa files search \"<terms>\"` (hybrid semantic + keyword, the web UI's "
+    "search). It is RANKED and capped at 50 results, has "
+    "no field scoping (no title:) and no exact count — so it cannot support a "
+    "\"not located\" finding. For filenames use `pcxa files list --search`."
+)
+
+
 def cmd_files_list(client, args):
     """List/filter files by metadata."""
+    if getattr(args, "content", None):
+        print(RETIRED_BODY_SEARCH.format(what="`files list --content`"), file=sys.stderr)
+        return 2
     params = client.paginate_params(args.limit, args.offset)
     if args.ext:
         types = [t.strip().upper() for t in args.ext.split(",")]
@@ -48,25 +65,14 @@ def cmd_files_list(client, args):
         # back into the tighter 0.8-threshold substring mode.
         if not getattr(args, "exact", False):
             params["search_mode"] = "fuzzy"
-    if getattr(args, "content", None):
-        # Literal substring match on indexed file *body* (not just the title) —
-        # finds files whose contents contain the term even when the filename
-        # doesn't (e.g. emails named by a bare Bates number). Exhaustive and
-        # countable (unlike `files search`). Composes with --search.
-        params["content_contains"] = args.content
     if args.index_status:
         params["search_status"] = args.index_status
     # Ordering defaults:
     #  - explicit --sort always wins.
-    #  - --content: order by `id` — a unique, deterministic key so paging is
-    #    exhaustive (exactly `count` distinct ids, no repeats/skips), which is
-    #    what a content enumeration needs.
     #  - --search: omit `ordering` so TrigramSearchFilter ranks by similarity.
     #  - otherwise: -created_at (prior listing UX).
     if args.sort is not None:
         sort = args.sort
-    elif getattr(args, "content", None):
-        sort = "id"
     elif args.search:
         sort = None
     else:
@@ -77,8 +83,7 @@ def cmd_files_list(client, args):
     if args.count_only:
         # The list endpoint defers the count for any filtered query
         # (count:null, count_state=deferred), so read the exact total for the
-        # same filter set from the /total-size/ action instead. This is what
-        # makes `--content <term> --count-only` return a real number.
+        # same filter set from the /total-size/ action instead.
         data = client.get("files/total-size/", params)
         count = data.get("count") if isinstance(data, dict) else None
         print(json.dumps({"count": count}))
@@ -118,9 +123,8 @@ def cmd_files_search(client, args):
     if requested and requested > SEMANTIC_SEARCH_CAP:
         print(
             f"Note: `files search` is a relevance-ranked top-{SEMANTIC_SEARCH_CAP} "
-            f"(you asked for {requested}) — a ranked sample, NOT a count. To enumerate "
-            f'and COUNT every file whose text contains a term, use:  '
-            f'pcxa files list --content "{args.query}" [--count-only]',
+            f"(you asked for {requested}) — a ranked sample, NOT a count. pcxa has no "
+            f"exhaustive body search since v1.1.24 (PCX-Analytics/pcxa#3850).",
             file=sys.stderr,
         )
 
@@ -145,7 +149,7 @@ def _print_search_results(data, *, query):
     hybrid = data.get("hybrid_enabled")
     suffix = "  (hybrid)" if hybrid else ""
     # At the cap this is a ranked sample, not a total — don't let the header read
-    # as "there are exactly N matches" (use `files list --content` to count).
+    # as "there are exactly N matches".
     total_label = f"{total} (ranked top-{SEMANTIC_SEARCH_CAP}, capped — not a count)" \
         if total >= SEMANTIC_SEARCH_CAP else str(total)
     print(f"Search results for {query!r}: {total_label}{suffix}\n")
@@ -295,101 +299,13 @@ def cmd_files_batch_read(client, args):
 
 
 def cmd_files_query(client, args):
-    """Boolean file search — AND / OR / NOT, grouping, field scoping, phrases.
+    """Retired: boolean search left the server in pcxa v1.1.24.
 
-    Routes through ``semantic-search/boolean-search/``. This is the *precise*
-    channel: unlike ``files search`` (a relevance-ranked, 50-capped sample) it
-    returns an unranked result set in stable id order, and unlike
-    ``files list --search/--content`` it can express real boolean structure.
-
-    **Completeness caveat — multi-term ``AND`` is fixed PER PROJECT, and the
-    response does not say which behaviour you got.** Where the server-side fix
-    is not yet enabled, two or more CONTENT terms joined by ``AND`` compile
-    against the per-chunk text vector, so a match requires the terms to land in
-    the *same passage* (~3,000 chars) rather than merely the same file.
-    Measured: 1,042 returned where 3,496 match (~70% missed); on another shape
-    3,738 returned where 9,342 match (~60% missed).
-
-    ``count_exact: true`` is returned on BOTH paths — the unfixed one labels a
-    wrong number exact whenever it lands under the ceiling — so it cannot be
-    used to tell them apart. Do not rest a completeness or "not located"
-    finding on a multi-term ``AND`` without confirming the fix is live for that
-    project; otherwise run each term separately and intersect the ids.
-
-    A single content term, ``title:`` predicates, ``OR`` and ``NOT`` are
-    unaffected. When the fix reaches a project, counts on existing ``AND``
-    queries go UP — that is the correction, not a regression.
-
-        pcxa files query 'title:schedule AND precast AND delay'
-        pcxa files query 'title:report AND (delay OR "change order")'
-        pcxa files query 'contract NOT draft' --ext PDF
-
-    A quoted term is matched as an adjacent phrase, so
-    ``title:"Case Memo"`` is a true literal substring match on the filename —
-    which is what ``files list --search --exact`` does NOT give you (it
-    AND-matches the words separately; see --exact's help).
+    Kept as a command so scripts that still call it (pcxa's eval replay tools
+    among them) get a pointer and a non-zero exit instead of argparse noise.
     """
-    params = {"q": args.query, "limit": args.limit, "offset": args.offset}
-    if args.ext:
-        params["file_types"] = args.ext
-    if args.folder:
-        params["folder_id"] = args.folder
-    for cli_name, api_name in (
-        ("doc_date_from", "document_date_from"),
-        ("doc_date_to", "document_date_to"),
-        ("created_from", "created_from"),
-        ("created_to", "created_to"),
-    ):
-        value = getattr(args, cli_name, None)
-        if value:
-            params[api_name] = value
-
-    data = client.get("semantic-search/boolean-search/", params)
-
-    for r in data.get("results", []):
-        fid = r.get("file_id")
-        if fid:
-            r["url"] = client.file_url(fid)
-
-    if args.count_only:
-        print(json.dumps({"count": data.get("total_files"), "exact": data.get("count_exact")}))
-        return
-
-    if args.format == "json":
-        out_json(data)
-        return
-
-    _print_boolean_results(data)
-
-
-def _print_boolean_results(data):
-    """Render a ``boolean-search`` response.
-
-    Always shows how the query was PARSED and whether the count is exact.
-    Both are the point of this command: a result set you cannot verify the
-    interpretation of is not one you can cite in work product.
-    """
-    results = data.get("results") or []
-    total = data.get("total_files", len(results))
-    exact = data.get("count_exact", True)
-    count_label = str(total) if exact else f"{total}+ (ceiling reached — narrow the query for an exact count)"
-
-    print(f"Parsed as: {data.get('parsed', '(unknown)')}")
-    print(f"Matches:   {count_label}\n")
-    if not results:
-        print("  (no results — count:0 means genuinely not located, not truncated)")
-        return
-    rows = [
-        {
-            "id": str(r.get("file_id", "")),
-            "name": str(r.get("file_name") or "")[:50],
-            "type": r.get("file_type", ""),
-            "folder": (r.get("folder_path") or "/")[:30],
-            "url": r.get("url", ""),
-        }
-        for r in results
-    ]
-    out_table(rows, ["id", "name", "type", "folder", "url"])
+    print(RETIRED_BODY_SEARCH.format(what="`files query` (boolean search)"), file=sys.stderr)
+    return 2
 
 
 def cmd_files_content(client, args):

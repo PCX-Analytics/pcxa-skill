@@ -310,6 +310,64 @@ def test_on_resolved_fires_once_per_newly_resolved_dir():
     assert seen[0][1] == 11
 
 
+def test_a_stale_checkpointed_folder_is_dropped_and_re_resolved():
+    """#14: folder 4242 (and 4243 inside it) was deleted server-side after the
+    run that checkpointed it. Listing under it 404s; that used to abort every
+    later run."""
+    c = FakeFolderClient(tree={5: {}},
+                         subfolder_effects=[_http_error(404), _http_error(404)])
+    dropped = []
+
+    result = _resolve_or_create_folders(
+        c, ["a", "a/b", "a/b/c"], 5, known={"a": 4242, "a/b": 4243},
+        on_stale=dropped.extend)
+
+    assert sorted(dropped) == ["a", "a/b"], "the stale id and its checkpointed child"
+    assert result["a"] == c.tree[5]["a"] != 4242
+    assert result["a/b"] == c.tree[result["a"]]["b"]
+    assert result["a/b/c"] == c.tree[result["a/b"]]["c"]
+
+
+def test_a_stale_checkpointed_parent_also_remaps_dirs_resolved_earlier_in_the_pass():
+    """"a/z" is mapped from the checkpoint before "a/b/c" exposes "a" as stale;
+    it must not come back missing or pointing into the deleted folder."""
+    c = FakeFolderClient(tree={5: {}}, subfolder_effects=[_http_error(404)])
+
+    result = _resolve_or_create_folders(
+        c, ["a", "a/z", "a/b/c"], 5, known={"a": 4242, "a/z": 4244})
+
+    assert result["a"] == c.tree[5]["a"]
+    assert result["a/z"] == c.tree[result["a"]]["z"] != 4244
+
+
+def test_a_404_under_a_folder_resolved_this_run_still_fails_fast():
+    """Guard: only checkpointed ids are second-guessed."""
+    c = FakeFolderClient(tree={5: {"a": 11}},
+                         subfolder_effects=[None, _http_error(404)])
+
+    with pytest.raises(Exception) as exc:
+        _resolve_or_create_folders(c, ["a", "a/b"], 5)
+    assert getattr(exc.value.response, "status_code", None) == 404
+
+
+def test_sync_recovers_from_a_stale_checkpoint_and_rewrites_it(tmp_path, no_uploads):
+    (tmp_path / "src" / "a" / "b").mkdir(parents=True)
+    (tmp_path / "src" / "a" / "b" / "one.txt").write_text("1")
+    manifest_path = tmp_path / "sync.json"
+    manifest_path.write_text(json.dumps({
+        "version": 1, "files": {}, "folders": {"a": 4242},
+        "output_folder_id": 5,
+    }))
+
+    c = FakeFolderClient(tree={5: {}}, subfolder_effects=[_http_error(404)])
+    sync_mod.cmd_files_sync(c, _sync_args(tmp_path / "src", manifest_path))
+
+    new_a = c.tree[5]["a"]
+    assert no_uploads.work_folder_ids == [c.tree[new_a]["b"]]
+    saved = json.loads(manifest_path.read_text())["folders"]
+    assert saved == {"a": new_a, "a/b": c.tree[new_a]["b"]}, "the stale id must not be re-saved"
+
+
 def test_sync_checkpoints_resolved_folders_when_resolution_blows_up(tmp_path,
                                                                     capsys):
     """A failure mid-resolution must leave a resumable manifest.

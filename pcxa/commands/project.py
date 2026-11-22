@@ -67,7 +67,7 @@ def cmd_project_update(client, args):
 
 def cmd_project_members(client, args):
     """List project members with user IDs."""
-    params = {"limit": 100}
+    params = {"page_size": 1000}  # `limit` is ignored: StandardPagination reads page_size
     if args.search:
         params["search"] = args.search
     data = client.get("memberships/", params)

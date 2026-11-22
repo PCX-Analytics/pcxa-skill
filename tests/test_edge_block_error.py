@@ -134,3 +134,51 @@ def test_description_falls_back_when_the_vendor_is_unidentified():
     msg = describe_edge_block(resp)
     assert "CDN/WAF" in msg
     assert "cf-ray" not in msg
+
+
+# ── the hint names the kind of payload that tripped the rule ──────────────
+
+from pcxa._http import edge_block_hint  # noqa: E402
+
+
+def _blocked(kind, method="POST", size=120):
+    r = FakeResponse(403, {"content-type": "text/html", "server": "cloudflare"})
+    r.request_kind, r.request_method, r.request_bytes = kind, method, size
+    return r
+
+
+def test_json_body_block_points_at_the_text_not_at_an_upload():
+    """An activity description quoting `python -c "import ..."` is blocked at
+    the edge (2026-10-24); the old hint blamed file bytes, which sent people
+    looking for an upload that never happened."""
+    hint = edge_block_hint(_blocked("json", "PATCH", 812))
+    assert "PATCH with a 812-byte json body" in hint
+    assert "description" in hint and "Rephrase" in hint
+    assert "filename" not in hint
+
+
+def test_upload_block_still_asks_for_the_filename():
+    hint = edge_block_hint(_blocked("upload", "PUT", 4096))
+    assert "filename" in hint
+
+
+def test_unknown_request_shape_gets_a_generic_hint():
+    r = FakeResponse(403, {"content-type": "text/html"})
+    assert "never reached PCXA" in edge_block_hint(r)
+
+
+def test_stdlib_transport_records_what_was_sent(monkeypatch):
+    from pcxa import _http
+
+    sent = {}
+
+    def fake_do_request(conn, was_reused, method, target, body, headers, stream, url, pool):
+        sent["body"] = body
+        return _http.Response(403, "Forbidden", {"content-type": "text/html"}, b"<html>", url)
+
+    monkeypatch.setattr(_http, "_acquire_conn", lambda *a, **k: (object(), False))
+    monkeypatch.setattr(_http, "_do_request", fake_do_request)
+    resp = _http._request_stdlib("PATCH", "https://api.pcxa.app/api/x/", json={"description": "x"})
+    assert resp.request_method == "PATCH"
+    assert resp.request_kind == "json"
+    assert resp.request_bytes == len(sent["body"])

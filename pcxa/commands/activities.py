@@ -12,6 +12,7 @@ from pcxa._resolve import (
     resolve_member_by_name,
     validate_choice_field_values,
 )
+from pcxa.commands.templates import resolve_field_labels
 
 # Safety cap when following ``--all`` cursors, mirroring
 # ``APIClient.get_all_pages``: a runaway neighbourhood should stop, loudly,
@@ -139,6 +140,28 @@ def _assert_wbs_filter_applied(client, args, params):
     _check_wbs_rows(args, results)
 
 
+# StandardPagination's max_page_size (api/core/pagination.py): a larger
+# page_size is clamped, so `--limit 5000` used to return 1000 rows at most.
+MAX_PAGE_SIZE = 1000
+
+
+def _get_activity_pages(client, params, limit, offset):
+    """One page when ``limit`` fits the server's cap; else walk pages of the cap."""
+    if limit <= MAX_PAGE_SIZE:
+        return client.get("activities/", params)
+    params = dict(params, page_size=MAX_PAGE_SIZE, page=offset // MAX_PAGE_SIZE + 1)
+    skip = offset % MAX_PAGE_SIZE
+    results, data = [], {}
+    while len(results) < limit:
+        data = client.get("activities/", params)
+        results.extend(data.get("results", [])[skip:])
+        skip = 0
+        if not data.get("next"):
+            break
+        params["page"] += 1
+    return {"count": data.get("count"), "results": results[:limit]}
+
+
 def cmd_activities_list(client, args):
     """List activities."""
     params = client.paginate_params(args.limit, args.offset)
@@ -171,6 +194,18 @@ def cmd_activities_list(client, args):
         params["parent"] = args.parent
     if args.root_only:
         params["parent__isnull"] = "true"
+    # The flat list hides summary activities (any with children: Releases, most
+    # Work Packages) unless asked — the web grid shows them in its WBS view
+    # instead. A CLI caller asking for a type or the roots means all of them.
+    if not getattr(args, "leaves_only", False):
+        params["include_summary"] = "true"
+    # Archived rows are hidden unless `is_archived` is sent at all; an empty
+    # value bypasses that default without filtering, so both kinds come back.
+    archived = getattr(args, "archived", "exclude")
+    if archived == "include":
+        params["is_archived"] = ""
+    elif archived == "only":
+        params["is_archived"] = "true"
     if getattr(args, "wbs", None):
         params["wbs_code"] = args.wbs
     if getattr(args, "wbs_branch", None):
@@ -209,7 +244,7 @@ def cmd_activities_list(client, args):
         print(json.dumps({"count": client.get_count("activities/", params)}))
         return
 
-    data = client.get("activities/", params)
+    data = _get_activity_pages(client, params, args.limit, args.offset)
     results = data.get("results", data) if isinstance(data, dict) else data
     _check_wbs_rows(args, results)
     if args.format == "json":
@@ -303,7 +338,14 @@ def cmd_activities_create(client, args):
         payload["tags"] = [t.strip() for t in args.tags.split(",")]
     if args.wbs:
         payload["wbs_code"] = args.wbs
+    if getattr(args, "code", None):
+        payload["code"] = args.code
     cf = json.loads(args.custom_fields) if getattr(args, "custom_fields", None) else None
+    if getattr(args, "field", None):
+        if not args.type:
+            print("--field needs --type: labels are resolved per activity type.", file=sys.stderr)
+            sys.exit(1)
+        cf = {**(cf or {}), **resolve_field_labels(client, args.type, args.field)}
     if cf:
         payload[_CUSTOM_FIELDS_KEY] = cf
 
@@ -312,6 +354,10 @@ def cmd_activities_create(client, args):
         return
     _validate_activity_choice_values(client, cf, args)
     data = client.post("activities/", payload)
+    # The create path can drop `status` (the fleet's sync works around it with a
+    # follow-up PATCH); do the same here so `--status` means what it says.
+    if args.status and data.get("id") and data.get("status") != args.status:
+        data = client.patch(f"activities/{data['id']}/", {"status": args.status})
     if args.format == "json":
         out_json(data)
     else:
@@ -355,7 +401,15 @@ def cmd_activities_update(client, args):
         payload["parent"] = args.parent if args.parent != 0 else None
     if args.tags:
         payload["tags"] = [t.strip() for t in args.tags.split(",")]
+    if getattr(args, "code", None) is not None:
+        payload["code"] = args.code
     cf = json.loads(args.custom_fields) if getattr(args, "custom_fields", None) else None
+    current = None
+    if getattr(args, "field", None):
+        # Labels resolve against the activity's own type, so read it first.
+        current = client.get(f"activities/{args.activity_id}/")
+        cf = {**(cf or {}),
+              **resolve_field_labels(client, current.get("activity_type"), args.field)}
     if cf:
         payload[_CUSTOM_FIELDS_KEY] = cf
 
@@ -369,8 +423,9 @@ def cmd_activities_update(client, args):
     if cf:
         # Sent alone, these keys would clear every other custom field. The
         # values read back ({id, label} for a choice) are accepted as written.
-        current = client.get(f"activities/{args.activity_id}/").get(_CUSTOM_FIELDS_KEY) or {}
-        payload[_CUSTOM_FIELDS_KEY] = {**current, **cf}
+        if current is None:
+            current = client.get(f"activities/{args.activity_id}/")
+        payload[_CUSTOM_FIELDS_KEY] = {**(current.get(_CUSTOM_FIELDS_KEY) or {}), **cf}
     data = client.patch(f"activities/{args.activity_id}/", payload)
     if args.format == "json":
         out_json(data)
@@ -396,25 +451,49 @@ def cmd_activities_delete(client, args):
             print(f"Deleted {data.get('success_count', len(args.activity_ids))} activities")
 
 
+BULK_UPDATE_CHUNK = 500
+
+
 def cmd_activities_bulk_update(client, args):
     """Bulk update activities."""
-    updates = {}
+    fields = {}
     if args.status:
-        updates["status"] = args.status
-    if args.priority is not None:
-        updates["priority"] = args.priority
+        fields["status"] = args.status
     if args.owner:
-        updates["owner"] = args.owner
-    if not updates:
+        fields["owner"] = args.owner
+    if getattr(args, "assigned_to", None):
+        fields["assigned_to"] = args.assigned_to
+    if getattr(args, "percent", None) is not None:
+        fields["percent_complete"] = args.percent
+    if getattr(args, "due_date", None):
+        fields["due_date"] = args.due_date
+    if getattr(args, "type", None):
+        fields["activity_type"] = args.type
+    if getattr(args, "outcome", None) is not None:
+        fields["outcome"] = args.outcome
+    if getattr(args, "tags", None):
+        fields["tags"] = [t.strip() for t in args.tags.split(",")]
+    cf = json.loads(args.custom_fields) if getattr(args, "custom_fields", None) else None
+    if cf:
+        fields[_CUSTOM_FIELDS_KEY] = cf
+    if not fields:
         print("No updates specified.", file=sys.stderr)
         sys.exit(1)
     if args.dry_run:
-        print(f"Would BULK UPDATE {len(args.activity_ids)} activities: {updates}")
+        print(f"Would BULK UPDATE {len(args.activity_ids)} activities: {fields}")
         return
-    # activities/bulk_update/ is exposed as PATCH (unlike files/bulk_update/,
-    # which takes POST) — POST returns 405 Method Not Allowed.
-    data = client.bulk_call("activities/bulk_update/", "activity_ids", args.activity_ids,
-                            {"updates": updates}, method="PATCH")
+    # The server takes one row per activity — {"updates": [{"id", "fields"}]} —
+    # validated as a list; a single dict under "updates" 400s. It is PATCH only
+    # (POST → 405), and each request is atomic: one bad row rolls back its chunk.
+    data = {"success_count": 0, "error_count": 0, "errors": [], "chunks": 0}
+    ids = list(args.activity_ids)
+    for i in range(0, len(ids), BULK_UPDATE_CHUNK):
+        rows = [{"id": a, "fields": fields} for a in ids[i:i + BULK_UPDATE_CHUNK]]
+        resp = client.patch("activities/bulk_update/", {"updates": rows}) or {}
+        data["success_count"] += resp.get("success_count", 0)
+        data["error_count"] += resp.get("error_count", 0)
+        data["errors"].extend(resp.get("errors") or [])
+        data["chunks"] += 1
     if args.format == "json":
         out_json(data)
     else:
@@ -811,9 +890,9 @@ def cmd_deps_list(client, args):
 
 
 def cmd_deps_create(client, args):
-    payload = {"predecessor": args.predecessor, "successor": args.successor, "dependency_type": args.dep_type}
-    if args.lag is not None:
-        payload["lag_days"] = args.lag
+    # lag_days is a required serializer field (no default), so it is always sent.
+    payload = {"predecessor": args.predecessor, "successor": args.successor,
+               "dependency_type": args.dep_type, "lag_days": args.lag}
     if args.notes:
         payload["notes"] = args.notes
     if args.dry_run:

@@ -57,6 +57,15 @@ DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
 # disable it freely when a load needs to move faster.
 DEFAULT_CHUNKS_PER_HOUR = 60_000
 
+# Request-body cap on this endpoint (pcxa #2873, 128 MiB). An over-cap body is a
+# 413 raised before the server parses it, so nothing in `results` names the
+# file. A full 5,000-chunk batch of 768-float vectors is 86-177 MiB depending
+# on chunk length, so count limits alone do not keep under it. The default
+# budget leaves headroom for the `embedding_model` key and `items` wrapper,
+# which the per-item measure does not count.
+MAX_REQUEST_BYTES = 128 * 1024 * 1024
+DEFAULT_MAX_BYTES = 100 * 1024 * 1024
+
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 RETRIES = 4
 UPLOAD_TIMEOUT = 300
@@ -388,8 +397,15 @@ def cmd_files_upload_chunks(client, args):
     def _progress(msg):
         print(msg, file=sys.stderr if as_json else sys.stdout)
 
+    # ocr.py imports this module at load time, so its byte measure is imported
+    # here, at call time, to avoid the cycle.
+    from pcxa._http import HTTPError
+    from pcxa.commands.ocr import _item_bytes
+
     files_per_req = min(max(1, args.files_per_request), MAX_FILES_PER_REQUEST)
     chunks_per_req = min(max(1, args.chunks_per_request), MAX_CHUNKS_PER_REQUEST)
+    max_bytes = min(max(1, getattr(args, "max_bytes", DEFAULT_MAX_BYTES) or DEFAULT_MAX_BYTES),
+                    MAX_REQUEST_BYTES)
 
     try:
         by_path, by_name = _load_manifest_index(args.manifest)
@@ -417,7 +433,7 @@ def cmd_files_upload_chunks(client, args):
     }
     errors_log = open(args.error_log, "a", encoding="utf-8") if args.error_log else None
 
-    batch, batch_chunks, batch_ids = [], 0, []
+    batch, batch_chunks, batch_bytes, batch_ids = [], 0, 0, []
     queued = 0
     aborted = False
 
@@ -428,51 +444,82 @@ def cmd_files_upload_chunks(client, args):
             errors_log.write(json.dumps({"file_id": file_id, "error": msg}) + "\n")
             errors_log.flush()
 
+    def _send(items):
+        """POST ``items``; on a 413, split in half and send each half, down to one file.
+
+        The budget keeps a batch under pcxa's cap, but an older server or a cap
+        lowered by configuration can still refuse it, and a 413 says nothing
+        about which file was too big.
+        """
+        nonlocal aborted
+        n_chunks = sum(len(i["chunks"]) for i in items)
+        try:
+            data = _post_batch(
+                client, {"embedding_model": model, "items": items},
+                timeout=getattr(args, "http_timeout", None) or UPLOAD_TIMEOUT,
+            )
+        except HTTPError as exc:
+            if getattr(getattr(exc, "response", None), "status_code", 0) != 413:
+                _record_error(f"batch of {len(items)} file(s) failed: {exc}")
+            elif len(items) > 1:
+                mid = len(items) // 2
+                _progress(f"  413 on {len(items)} file(s) — splitting into {mid} + "
+                          f"{len(items) - mid} and retrying")
+                _send(items[:mid])
+                if not aborted:
+                    _send(items[mid:])
+                return
+            else:
+                fid = items[0]["file_id"]
+                _record_error(
+                    f"file {fid}: the server refused its {n_chunks}-chunk request as too "
+                    f"large (413) even alone — split the document or lower its chunk count.",
+                    file_id=fid,
+                )
+            if args.max_failures and len(summary["errors"]) >= args.max_failures:
+                aborted = True
+            return
+        except Exception as exc:
+            _record_error(f"batch of {len(items)} file(s) failed: {exc}")
+            if args.max_failures and len(summary["errors"]) >= args.max_failures:
+                aborted = True
+            return
+        summary["requests"] += 1
+        ok_ids = []
+        for row in data.get("results", []):
+            fid = row.get("file_id")
+            if row.get("error"):
+                _record_error(f"file {fid}: {row['error']}", file_id=fid)
+            else:
+                ok_ids.append(fid)
+                summary["files_applied"] += 1
+        summary["chunks_sent"] += n_chunks
+        applied.update(ok_ids)
+        _save_state(args.state, applied)
+        slept = pacer.record_and_wait(n_chunks)
+        rate = summary["chunks_sent"] / max(1e-9, time.monotonic() - pacer.started) * 3600
+        _progress(
+            f"  {summary['files_applied']:,} file(s), {summary['chunks_sent']:,} chunk(s) "
+            f"— {rate:,.0f}/hr"
+            + (f" (paced +{slept:.0f}s)" if slept else "")
+        )
+        if args.max_failures and len(summary["errors"]) >= args.max_failures:
+            aborted = True
+
     def _flush():
-        nonlocal batch, batch_chunks, batch_ids, aborted
+        nonlocal batch, batch_chunks, batch_bytes, batch_ids
         if not batch:
             return
-        payload = {"embedding_model": model, "items": batch}
         n_files, n_chunks = len(batch), batch_chunks
         if args.dry_run:
-            _progress(f"  [dry-run] would POST {n_files} file(s) / {n_chunks} chunk(s)")
+            _progress(f"  [dry-run] would POST {n_files} file(s) / {n_chunks} chunk(s) "
+                      f"/ {batch_bytes / 1e6:.1f} MB")
             summary["files_applied"] += n_files
             summary["chunks_sent"] += n_chunks
             summary["requests"] += 1
         else:
-            try:
-                data = _post_batch(
-                    client, payload,
-                    timeout=getattr(args, "http_timeout", None) or UPLOAD_TIMEOUT,
-                )
-            except Exception as exc:
-                _record_error(f"batch of {n_files} file(s) failed: {exc}")
-                batch, batch_chunks, batch_ids = [], 0, []
-                if args.max_failures and len(summary["errors"]) >= args.max_failures:
-                    aborted = True
-                return
-            summary["requests"] += 1
-            ok_ids = []
-            for row in data.get("results", []):
-                fid = row.get("file_id")
-                if row.get("error"):
-                    _record_error(f"file {fid}: {row['error']}", file_id=fid)
-                else:
-                    ok_ids.append(fid)
-                    summary["files_applied"] += 1
-            summary["chunks_sent"] += n_chunks
-            applied.update(ok_ids)
-            _save_state(args.state, applied)
-            slept = pacer.record_and_wait(n_chunks)
-            rate = summary["chunks_sent"] / max(1e-9, time.monotonic() - pacer.started) * 3600
-            _progress(
-                f"  {summary['files_applied']:,} file(s), {summary['chunks_sent']:,} chunk(s) "
-                f"— {rate:,.0f}/hr"
-                + (f" (paced +{slept:.0f}s)" if slept else "")
-            )
-            if args.max_failures and len(summary["errors"]) >= args.max_failures:
-                aborted = True
-        batch, batch_chunks, batch_ids = [], 0, []
+            _send(batch)
+        batch, batch_chunks, batch_bytes, batch_ids = [], 0, 0, []
 
     try:
         for source, line_no, record in _iter_jsonl(args.paths):
@@ -509,13 +556,30 @@ def cmd_files_upload_chunks(client, args):
                 )
                 continue
 
-            if batch and (len(batch) >= files_per_req or batch_chunks + n > chunks_per_req):
+            size = _item_bytes(item)
+            if size > max_bytes:
+                # One file's chunks replace its index wholesale, so they cannot
+                # be spread across requests.
+                summary["files_rejected"] += 1
+                _record_error(
+                    f"{source}:{line_no}: file {item['file_id']} serializes to "
+                    f"{size / 1e6:.1f} MB, over the {max_bytes / 1e6:.1f} MB request "
+                    f"budget — split the document or lower its chunk count (--max-bytes "
+                    f"goes up to the server's {MAX_REQUEST_BYTES / 1e6:.0f} MB cap).",
+                    file_id=item["file_id"],
+                )
+                continue
+
+            # Pack by count *and* bytes: see MAX_REQUEST_BYTES.
+            if batch and (len(batch) >= files_per_req or batch_chunks + n > chunks_per_req
+                          or batch_bytes + size > max_bytes):
                 _flush()
                 if aborted:
                     break
 
             batch.append(item)
             batch_chunks += n
+            batch_bytes += size
             batch_ids.append(item["file_id"])
             summary["with_embeddings" if has_emb else "without_embeddings"] += 1
             queued += 1
@@ -620,7 +684,10 @@ def cmd_files_set_index_mode(client, args):
     # hands every request a reference to the same object, so anything that keeps
     # the payload (a recorder, a retry wrapper, a log line) sees only the last
     # slice.
-    updated = skipped = 0
+    # `updated` counts rows whose mode changed and `unchanged` rows already at
+    # the target mode; only their sum says how many files are now in the
+    # requested state, so a re-run is not mistaken for a no-op (#22).
+    updated = unchanged = skipped = 0
     warnings = []
     for start in range(0, len(file_ids), 10_000):
         payload = {"file_ids": file_ids[start:start + 10_000], "index_mode": args.mode}
@@ -628,14 +695,17 @@ def cmd_files_set_index_mode(client, args):
             payload["index_text_source"] = args.index_text_source
         data = client.post("files/bulk_set_index_mode/", json_data=payload)
         updated += data.get("updated") or 0
+        unchanged += data.get("unchanged") or 0
         skipped += len(data.get("skipped") or [])
         warnings.extend(data.get("warnings") or [])
 
-    result = {"updated": updated, "skipped": skipped, "warnings": warnings}
+    result = {"updated": updated, "unchanged": unchanged, "skipped": skipped,
+              "warnings": warnings}
     if as_json:
         out_json(result)
     else:
-        print(f"index_mode={args.mode}: {updated:,} updated, {skipped:,} skipped")
+        print(f"index_mode={args.mode}: {updated:,} updated, {unchanged:,} unchanged, "
+              f"{skipped:,} skipped ({updated + unchanged:,} in the requested state)")
         for w in warnings[:20]:
             print(f"  warning: {w}")
     return 0

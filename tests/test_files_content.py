@@ -1,7 +1,6 @@
-"""Tests for `files list --content` — literal substring search of file BODY on
-the paginated + countable list (the gap: title-only `--search` can't find files
-by their contents, and `files search` is a ranked top-50 with no count), plus
-the `files search` clamp notice.
+"""Tests for `files list` display and the `files search` clamp notice.
+
+`files list --content` was retired with pcxa#3850; see test_files_query.py.
 """
 
 import json
@@ -11,7 +10,6 @@ from pcxa.commands.files import SEMANTIC_SEARCH_CAP, cmd_files_list, cmd_files_s
 from tests.conftest import FakeResponse
 
 LIST_URL = "https://api.example.com/api/companies/1/projects/2/files/"
-TOTAL_URL = "https://api.example.com/api/companies/1/projects/2/files/total-size/"
 SEARCH_URL = "https://api.example.com/api/companies/1/projects/2/semantic-search/search/"
 
 
@@ -30,46 +28,6 @@ def _search_args(**kwargs):
     defaults = {"query": "IOCC-387", "page_size": 25, "scope": None, "ext": None, "format": "json"}
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
-
-
-def test_content_sends_content_contains_and_stable_order(client):
-    client.session.default = FakeResponse(200, {"count": 2, "count_state": "exact", "results": []})
-    cmd_files_list(client, _args(content="IOCC-387"))
-    call = client.session.calls[-1]
-    assert call["method"] == "GET"
-    assert call["url"] == LIST_URL
-    # Literal-substring backend filter param.
-    assert call["params"]["content_contains"] == "IOCC-387"
-    # Exhaustive paging needs a unique, deterministic order.
-    assert call["params"]["ordering"] == "id"
-    # A title search must NOT be sent when only --content is given.
-    assert "search" not in call["params"]
-
-
-def test_content_count_only_uses_total_size(client, capsys):
-    client.session.default = FakeResponse(200, {"total_size": 123, "count": 217})
-    cmd_files_list(client, _args(content="IOCC-387", count_only=True))
-    call = client.session.calls[-1]
-    assert call["url"] == TOTAL_URL
-    assert call["params"]["content_contains"] == "IOCC-387"
-    assert json.loads(capsys.readouterr().out) == {"count": 217}
-
-
-def test_content_composes_with_title_search(client):
-    client.session.default = FakeResponse(200, {"count": 1, "results": []})
-    cmd_files_list(client, _args(content="IOCC-387", search="report"))
-    params = client.session.calls[-1]["params"]
-    assert params["content_contains"] == "IOCC-387"
-    assert params["search"] == "report"  # both ride along (title AND body)
-    # An explicit --search means the user opted into title matching; --content
-    # still pins a stable order for enumeration.
-    assert params["ordering"] == "id"
-
-
-def test_explicit_sort_overrides_content_default(client):
-    client.session.default = FakeResponse(200, {"count": 0, "results": []})
-    cmd_files_list(client, _args(content="IOCC-387", sort="-created_at"))
-    assert client.session.calls[-1]["params"]["ordering"] == "-created_at"
 
 
 def test_deferred_count_display_is_not_none(client, capsys):
@@ -94,7 +52,7 @@ def test_search_clamps_limit_and_warns(client, capsys):
     assert call["params"]["limit"] == SEMANTIC_SEARCH_CAP  # clamped, not 200
     err = capsys.readouterr().err
     assert "ranked" in err.lower()
-    assert "files list --content" in err  # points at the exhaustive/countable path
+    assert "not a count" in err.lower()
 
 
 def test_search_no_warning_under_cap(client, capsys):
