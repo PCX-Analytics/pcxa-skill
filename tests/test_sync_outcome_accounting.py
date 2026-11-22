@@ -180,6 +180,16 @@ def _run(client, args, capsys):
     return rc, _json.loads(out)
 
 
+def _sent_names(client):
+    """Filenames in the first bulk-register batch, in the order the CLI sent them.
+
+    The fakes answer by batch position, as the server does. Uploads can finish in
+    any order, so which file sits at position 0 varies from run to run; assert on
+    the batch, never on ``f000.pdf`` (3 of 30 local runs failed that way).
+    """
+    return [item["original_filename"] for item in client.register_calls[0]]
+
+
 def _assert_invariant(summary):
     accounted = (summary["created"] + summary["duplicate"] + summary["error"]
                  + summary["unrecognized"] + summary["not_attempted"])
@@ -242,14 +252,15 @@ def test_an_unrecognized_row_status_is_counted_and_exits_partial(tmp_path, stora
                      "results": results}
 
     manifest = tmp_path / "m.json"
-    rc, summary = _run(FakeOrigin(register=mystery),
-                       _args(_tree(tmp_path, 2), manifest=str(manifest)), capsys)
+    client = FakeOrigin(register=mystery)
+    rc, summary = _run(client, _args(_tree(tmp_path, 2), manifest=str(manifest)), capsys)
 
     assert rc == sync.EXIT_PARTIAL
     assert summary["unrecognized"] == 1
     _assert_invariant(summary)
     recorded = _json.loads(manifest.read_text())["files"]
-    assert "f000.pdf" not in recorded, "an unrecognized row must not be recorded as done"
+    quarantined = _sent_names(client)[0]
+    assert quarantined not in recorded, "an unrecognized row must not be recorded as done"
 
 
 def test_a_failure_budget_abort_exits_aborted(tmp_path, storage, capsys):
@@ -371,7 +382,7 @@ def test_a_final_connection_lost_503_keeps_the_rows_the_server_committed(tmp_pat
     assert rc == sync.EXIT_PARTIAL
 
     recorded = _json.loads(manifest.read_text())["files"]
-    assert set(recorded) == {"f000.pdf", "f001.pdf"}, (
+    assert set(recorded) == set(_sent_names(client)[:2]), (
         "the committed rows must be in the manifest so a re-run does not re-upload them"
     )
 
@@ -408,16 +419,18 @@ def test_a_rejected_row_never_enters_the_manifest_and_is_retried(tmp_path, stora
 
     src = _tree(tmp_path, 3)
     manifest = tmp_path / "m.json"
-    _run(FakeOrigin(register=reject_first), _args(src, manifest=str(manifest)), capsys)
+    first = FakeOrigin(register=reject_first)
+    _run(first, _args(src, manifest=str(manifest)), capsys)
+    rejected, *landed = _sent_names(first)
 
     recorded = _json.loads(manifest.read_text())["files"]
-    assert "f000.pdf" not in recorded
-    assert {"f001.pdf", "f002.pdf"} <= set(recorded)
+    assert rejected not in recorded
+    assert set(landed) <= set(recorded)
 
     rerun = FakeOrigin()
     rc, summary = _run(rerun, _args(src, manifest=str(manifest), trust_manifest=True), capsys)
     assert summary["to_upload"] == 1, "the re-run must retry exactly the rejected file"
-    assert [i["original_filename"] for i in rerun.register_calls[0]] == ["f000.pdf"]
+    assert _sent_names(rerun) == [rejected]
     assert rc == 0
 
 
