@@ -106,6 +106,7 @@ from pcxa.commands.activities import (
     cmd_tree,
 )
 from pcxa.commands.chat import (
+    cmd_chat_debug,
     cmd_chat_delete,
     cmd_chat_get,
     cmd_chat_ls,
@@ -315,7 +316,7 @@ SUB_HANDLERS = {
     "chat": {
         "send": cmd_chat_send, "ls": cmd_chat_ls, "get": cmd_chat_get,
         "new": cmd_chat_new, "delete": cmd_chat_delete, "models": cmd_chat_models,
-        "trace": cmd_chat_trace,
+        "trace": cmd_chat_trace, "debug": cmd_chat_debug,
     },
     "audit": {"list": cmd_audit_list, "history": cmd_audit_history},
 }

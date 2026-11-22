@@ -168,12 +168,10 @@ def _print_trace(trace):
         f"  queue {_secs(t.get('queue_wait'))} · setup {_secs(t.get('setup'))} · "
         f"first text {_secs(t.get('first_text'))} · total {_secs(t.get('total'))}"
     )
-    tools = trace.get("tools") or {}
-    if tools:
-        print("TOOLS")
-        for name, agg in sorted(tools.items(), key=lambda kv: -kv[1].get("total_ms", 0)):
-            errors = f", {agg['errors']} errors" if agg.get("errors") else ""
-            print(f"  {name}: {agg['calls']} calls, {_secs(agg.get('total_ms'))}{errors}")
+    layers = trace.get("instruction_layers")
+    if layers:
+        print(f"  instructions: {_layers(layers)}")
+    _print_tools(trace.get("tools") or {})
     print("STEPS")
     for step in trace.get("steps") or []:
         label = step.get("tool") or step.get("type")
@@ -194,20 +192,97 @@ def _print_trace(trace):
     else:
         print("SEARCHES")
         for ev in search.get("events") or []:
-            what = ev.get("engine") or ev.get("reason") or ""
-            ms = ev.get("engine_ms")
+            what = (ev.get("leg") if ev.get("kind") == "leg" else ev.get("engine") or ev.get("reason")) or ""
+            ms = ev.get("ms") if ev.get("kind") == "leg" else ev.get("engine_ms")
             took = f" {ms}ms" if ms is not None else ""
             rows = f" rows={ev['rows']}" if ev.get("rows") is not None else ""
             query = f' "{ev["query"]}"' if ev.get("query") else ""
             extra = f" detail={ev['detail']}" if ev.get("detail") else ""
-            print(f"  +{_secs(ev.get('t_ms'))} {ev.get('kind')} {what}{took}{rows}{query}{extra}")
+            extra += f" ERROR {ev['error']}" if ev.get("error") else ""
+            who = f" [sub-agent {ev['task']}]" if ev.get("task") else ""
+            print(f"  +{_secs(ev.get('t_ms'))} {ev.get('kind')} {what}{took}{rows}{query}{extra}{who}")
         if search.get("dropped"):
             print(f"  ({search['dropped']} events not recorded)")
     for child in trace.get("children") or []:
         print(
             f"SUB-AGENT task {child.get('id')} {child.get('agent_type')} {child.get('status')} "
-            f"{_secs(child.get('duration_ms'))}  (pcxa chat trace {child.get('id')})"
+            f"+{_secs(child.get('offset_ms'))} took {_secs(child.get('duration_ms'))}"
         )
+        if child.get("error_category"):
+            print(f"  error: {child['error_category']}: {child.get('error_message') or ''}")
+        _print_tools(child.get("tools") or {}, header=False)
+
+
+def _layers(layers):
+    """Which custom-instruction layers ran: where an unasked-for language or tone comes from."""
+    parts = []
+    if layers.get("user_global_present"):
+        parts.append(f"user global ({layers.get('user_global_chars')} chars)")
+    if layers.get("project_default_title"):
+        parts.append(f'project default "{layers["project_default_title"]}"')
+    parts += [f'personal "{t}"' for t in layers.get("active_personal_titles") or []]
+    return ", ".join(parts) or "none"
+
+
+def _print_tools(tools, header=True):
+    if not tools:
+        return
+    if header:
+        print("TOOLS")
+    for name, agg in sorted(tools.items(), key=lambda kv: -kv[1].get("total_ms", 0)):
+        errors = f", {agg['errors']} errors" if agg.get("errors") else ""
+        peak = f", max {_secs(agg['max_ms'])}" if agg.get("max_ms") is not None else ""
+        print(f"  {name}: {agg['calls']} calls, {_secs(agg.get('total_ms'))}{peak}{errors}")
+
+
+def _print_session(session):
+    """A conversation's turns, one block each (``--format table``)."""
+    conv = session.get("conversation") or {}
+    print(f"SESSION conversation {conv.get('id')}  {conv.get('title') or ''}")
+    for turn in session.get("turns") or []:
+        t = turn.get("timings_ms") or {}
+        print(
+            f"TURN task {turn.get('task_id')}  {turn.get('status')}  model {turn.get('model')}  "
+            f"queue {_secs(t.get('queue_wait'))} · first text {_secs(t.get('first_text'))} · "
+            f"total {_secs(t.get('total'))}"
+        )
+        print(f"  prompt: {turn.get('prompt')}")
+        if turn.get("error_category"):
+            print(f"  error: {turn['error_category']}")
+        tools = turn.get("tools") or {}
+        if tools:
+            print(
+                "  tools: "
+                + ", ".join(
+                    f"{name} x{agg['calls']}" + (f" ({agg['errors']} errors)" if agg.get("errors") else "")
+                    for name, agg in tools.items()
+                )
+            )
+        subagents = turn.get("subagents") or {}
+        if subagents.get("count"):
+            print(
+                f"  sub-agents: {subagents['count']}, {subagents.get('failed', 0)} failed, "
+                f"longest {_secs(subagents.get('max_ms'))}"
+            )
+        if turn.get("instruction_layers"):
+            print(f"  instructions: {_layers(turn['instruction_layers'])}")
+        search = turn.get("search_summary")
+        if search:
+            print(
+                f"  searches: keyword {search.get('keyword_engines')}, fallbacks {search.get('fallbacks')}, "
+                f"slowest leg {_secs(search.get('slowest_leg_ms'))}, leg errors {search.get('leg_errors')}"
+            )
+        elif not turn.get("traced"):
+            print("  searches: not recorded (send with --trace)")
+        print(f"  details: pcxa chat trace {turn.get('task_id')}")
+
+
+def cmd_chat_debug(client, args):
+    session = client.get(f"conversations/{args.conversation_id}/trace/")
+    if args.format == "table":
+        _print_session(session)
+    else:
+        out_json(session)
 
 
 def cmd_chat_trace(client, args):
