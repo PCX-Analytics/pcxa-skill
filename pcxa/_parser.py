@@ -1480,9 +1480,14 @@ def build_parser():
         help="Staff only: record this turn's search events and print its trace after the answer",
     )
 
-    p = chat_sub.add_parser("trace", help="Staff only: one turn's timings, steps and search events")
-    p.add_argument("agent_task_id", type=int, help="Agent task id (from `chat send`)")
+    p = chat_sub.add_parser(
+        "trace", help="Staff or trace-allowlisted: one turn's timings, steps, sub-agents and search events"
+    )
+    p.add_argument("agent_task_id", type=int, help="Agent task id (from `chat send` or `chat debug`)")
     p.add_argument("--full", action="store_true", help="Include stored tool inputs, outputs and thinking text")
+
+    p = chat_sub.add_parser("debug", help="Staff or trace-allowlisted: every turn of a conversation, one row each")
+    p.add_argument("conversation_id", type=int, help="Conversation id (from `chat send` or `chat ls`)")
 
     p = chat_sub.add_parser("ls", help="List conversations")
     p.add_argument("--search", help="Filter by title or message content")

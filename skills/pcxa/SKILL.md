@@ -957,9 +957,10 @@ pcxa chat send "..." --research                                      # enable fi
 pcxa chat send "..." --model gemini-2.5-pro                          # override model (see chat models)
 pcxa chat send "..." --no-wait                                       # fire-and-forget; returns agent_task_id
 pcxa chat send "..." --timeout 300                                   # polling timeout (default 180s)
-pcxa chat send "..." --trace                                         # staff only: record search events, print the trace
-pcxa chat trace 9001                                                 # staff only: one turn's timings, steps, searches
+pcxa chat send "..." --trace                                         # tracers only: record search events, print the trace
+pcxa chat trace 9001                                                 # tracers only: one turn's timings, steps, sub-agents, searches
 pcxa chat trace 9001 --full                                          # ...with stored tool inputs/outputs and thinking
+pcxa chat debug 2981                                                 # tracers only: every turn of a conversation, one block each
 
 pcxa chat ls --search "RFI"                                          # list conversations
 pcxa chat get [ID]                                                    # show full transcript (default: current)
@@ -994,7 +995,13 @@ CID=$(pcxa chat send "Which submittals are overdue?" --new --title "Agent sessio
 pcxa chat send "Which of those are for the pump package?" --conversation "$CID"
 ```
 
-**Troubleshooting a turn (staff only).** `--trace` asks the server to record every keyword search the turn runs (which engine answered, how long it took, why Pinecone fell back) and adds a `trace` object to the output; in `--format table` it prints a timeline after the answer. `chat trace <agent_task_id>` reads it later, and works on any of your own turns, but search events exist only for turns sent with `--trace`. Tool outputs are sizes and keys unless you pass `--full`. Non-staff accounts get a 403, and staff can only trace their own turns.
+**Troubleshooting a session (tracers only).** Tracers are staff, plus the accounts the server lists in `AI_CHAT_TRACE_ALLOWED_EMAILS`; anyone else gets a 403, and a tracer can only trace their own turns. Work from the session down:
+
+1. `chat debug <conversation_id>` prints every turn: status, queue wait, time to first text and total, tool calls and errors, sub-agents (how many, how many failed, the longest), which custom-instruction layers ran, and a search summary. Start here to find the slow or failed turn.
+2. `chat trace <agent_task_id>` opens one turn: every step with its duration and output size, per-tool totals with the slowest call, each sub-agent with its own tools and steps, and the search events. `--full` adds the stored tool inputs, outputs and thinking text.
+3. Search events exist only for turns sent with `--trace`. They record each search leg (semantic, keyword, title, activity) with its time, rows and error, which engine answered the keyword leg, and why Pinecone fell back. An event marked `[sub-agent N]` came from that sub-agent.
+
+Reading it: a reply in an unexpected language or tone usually comes from an instruction layer, so check the `instructions` line before the prompt. A slow turn is usually its sub-agents or one search leg; compare the turn total with the longest sub-agent and the slowest leg. A `retry_unavailable` or `breaker_open` fallback means Pinecone was down for that search and Postgres answered instead.
 
 ## Audit Log (company admins)
 
