@@ -960,7 +960,7 @@ pcxa chat send "..." --timeout 300                                   # polling t
 pcxa chat send "..." --trace                                         # tracers only: record search events, print the trace
 pcxa chat trace 9001                                                 # tracers only: one turn's timings, steps, sub-agents, searches
 pcxa chat trace 9001 --full                                          # ...with stored tool inputs/outputs and thinking
-pcxa chat debug 2981                                                 # tracers only: every turn of a conversation, one block each
+pcxa chat debug 501                                                  # tracers only: every turn of a conversation, one block each
 
 pcxa chat ls --search "RFI"                                          # list conversations
 pcxa chat get [ID]                                                    # show full transcript (default: current)
