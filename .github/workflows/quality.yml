@@ -11,7 +11,9 @@ permissions:
 jobs:
   offline-quality:
     name: Offline quality (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, which has no setup-python build of
+    # 3.9, the floor pyproject's requires-python promises.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
