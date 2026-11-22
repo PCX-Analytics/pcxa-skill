@@ -20,7 +20,7 @@ def _resolve_chat_conversation(client, args):
 
 
 def _wait_for_agent_task(client, task_id, timeout, interval=1.0):
-    """Poll assistant task status until terminal or timeout."""
+    """Poll the task's light ``status/`` read until terminal or timeout."""
     start = time.time()
     last_status = None
     while True:
@@ -28,7 +28,7 @@ def _wait_for_agent_task(client, task_id, timeout, interval=1.0):
         if elapsed > timeout:
             return {"status": last_status or "timeout", "_timed_out": True, "_elapsed": elapsed}
         try:
-            task = client.get(f"agent-tasks/{task_id}/")
+            task = client.get(f"agent-tasks/{task_id}/status/")
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
                 time.sleep(interval)
@@ -52,8 +52,21 @@ def cmd_chat_send(client, args):
         payload["model"] = args.model
     if args.page_url:
         payload["page_url"] = args.page_url
+    if getattr(args, "trace", False):
+        payload["trace"] = True
 
-    sent = client.post(f"conversations/{conv_id}/send/", payload)
+    try:
+        sent = client.post(f"conversations/{conv_id}/send/", payload)
+    except requests.HTTPError as e:
+        body = _error_body(e)
+        if e.response is not None and e.response.status_code == 409 and body.get("agent_task_id"):
+            print(
+                f"A turn is already running on conversation {conv_id} (task {body['agent_task_id']}). "
+                "Wait for it, or send with --new.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+        raise
     user_msg = sent.get("message") or {}
     task_id = sent.get("agent_task_id")
 
@@ -89,6 +102,14 @@ def cmd_chat_send(client, args):
         "user_message": {"id": user_msg.get("id"), "content": user_msg.get("content")},
         "assistant_message": assistant_msg,
     }
+    if getattr(args, "trace", False):
+        # The answer is already in hand: a server without the trace endpoint (404)
+        # or a non-staff account (403) is reported, not raised.
+        try:
+            result["trace"] = client.get(f"agent-tasks/{task_id}/trace/")
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            result["trace_error"] = f"trace unavailable (HTTP {status})"
 
     if args.format == "table":
         print(f"Conversation: {conv_id}  Task: {task_id}  Status: {final_status}  Elapsed: {result['elapsed_seconds']}s")
@@ -112,11 +133,90 @@ def cmd_chat_send(client, args):
                 print("\n[" + ", ".join(meta) + "]")
         else:
             print("(no assistant response yet)")
+        if result.get("trace"):
+            print()
+            _print_trace(result["trace"])
+        elif result.get("trace_error"):
+            print(f"\n({result['trace_error']})")
     else:
         out_json(result)
 
     if final_status == "failed":
         sys.exit(2)
+
+
+def _error_body(err):
+    try:
+        body = err.response.json() if err.response is not None else {}
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _secs(ms):
+    return "-" if ms is None else f"{ms / 1000:.1f}s"
+
+
+def _print_trace(trace):
+    """A turn trace as a readable timeline (``--format table``)."""
+    task = trace.get("task") or {}
+    t = trace.get("timings_ms") or {}
+    print(f"TRACE task {task.get('id')}  {task.get('status')}  model {task.get('model')}")
+    if task.get("error_category"):
+        print(f"  error: {task['error_category']}: {task.get('error_message') or ''}")
+    print(
+        f"  queue {_secs(t.get('queue_wait'))} · setup {_secs(t.get('setup'))} · "
+        f"first text {_secs(t.get('first_text'))} · total {_secs(t.get('total'))}"
+    )
+    tools = trace.get("tools") or {}
+    if tools:
+        print("TOOLS")
+        for name, agg in sorted(tools.items(), key=lambda kv: -kv[1].get("total_ms", 0)):
+            errors = f", {agg['errors']} errors" if agg.get("errors") else ""
+            print(f"  {name}: {agg['calls']} calls, {_secs(agg.get('total_ms'))}{errors}")
+    print("STEPS")
+    for step in trace.get("steps") or []:
+        label = step.get("tool") or step.get("type")
+        line = f"  #{step.get('n')} +{_secs(step.get('offset_ms'))} {step.get('type')} {label}"
+        if step.get("duration_ms") is not None:
+            line += f" {step['duration_ms']}ms"
+        out = step.get("output")
+        if isinstance(out, dict) and "chars" in out:
+            line += f" out={out['chars']} chars"
+            if out.get("results") is not None:
+                line += f", {out['results']} results"
+            if out.get("error"):
+                line += f" ERROR {out['error']}"
+        print(line)
+    search = trace.get("search")
+    if search is None:
+        print("SEARCHES (not recorded: send with --trace)")
+    else:
+        print("SEARCHES")
+        for ev in search.get("events") or []:
+            what = ev.get("engine") or ev.get("reason") or ""
+            ms = ev.get("engine_ms")
+            took = f" {ms}ms" if ms is not None else ""
+            rows = f" rows={ev['rows']}" if ev.get("rows") is not None else ""
+            query = f' "{ev["query"]}"' if ev.get("query") else ""
+            extra = f" detail={ev['detail']}" if ev.get("detail") else ""
+            print(f"  +{_secs(ev.get('t_ms'))} {ev.get('kind')} {what}{took}{rows}{query}{extra}")
+        if search.get("dropped"):
+            print(f"  ({search['dropped']} events not recorded)")
+    for child in trace.get("children") or []:
+        print(
+            f"SUB-AGENT task {child.get('id')} {child.get('agent_type')} {child.get('status')} "
+            f"{_secs(child.get('duration_ms'))}  (pcxa chat trace {child.get('id')})"
+        )
+
+
+def cmd_chat_trace(client, args):
+    params = {"full": "1"} if args.full else None
+    trace = client.get(f"agent-tasks/{args.agent_task_id}/trace/", params)
+    if args.format == "table":
+        _print_trace(trace)
+    else:
+        out_json(trace)
 
 
 def cmd_chat_ls(client, args):

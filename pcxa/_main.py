@@ -105,6 +105,7 @@ from pcxa.commands.chat import (
     cmd_chat_models,
     cmd_chat_new,
     cmd_chat_send,
+    cmd_chat_trace,
 )
 from pcxa.commands.forms import (
     cmd_fields_create,
@@ -305,6 +306,7 @@ SUB_HANDLERS = {
     "chat": {
         "send": cmd_chat_send, "ls": cmd_chat_ls, "get": cmd_chat_get,
         "new": cmd_chat_new, "delete": cmd_chat_delete, "models": cmd_chat_models,
+        "trace": cmd_chat_trace,
     },
     "audit": {"list": cmd_audit_list, "history": cmd_audit_history},
 }
