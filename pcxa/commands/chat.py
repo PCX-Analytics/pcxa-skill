@@ -192,7 +192,7 @@ def _print_trace(trace):
     else:
         print("SEARCHES")
         for ev in search.get("events") or []:
-            what = ev.get("leg") or ev.get("engine") or ev.get("reason") or ""
+            what = (ev.get("leg") if ev.get("kind") == "leg" else ev.get("engine") or ev.get("reason")) or ""
             ms = ev.get("ms") if ev.get("kind") == "leg" else ev.get("engine_ms")
             took = f" {ms}ms" if ms is not None else ""
             rows = f" rows={ev['rows']}" if ev.get("rows") is not None else ""
