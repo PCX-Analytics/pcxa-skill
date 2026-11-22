@@ -978,6 +978,9 @@ pcxa chat send "..." --research                                      # enable fi
 pcxa chat send "..." --model gemini-2.5-pro                          # override model (see chat models)
 pcxa chat send "..." --no-wait                                       # fire-and-forget; returns agent_task_id
 pcxa chat send "..." --timeout 300                                   # polling timeout (default 180s)
+pcxa chat send "..." --trace                                         # staff only: record search events, print the trace
+pcxa chat trace 9001                                                 # staff only: one turn's timings, steps, searches
+pcxa chat trace 9001 --full                                          # ...with stored tool inputs/outputs and thinking
 
 pcxa chat ls --search "RFI"                                          # list conversations
 pcxa chat get [ID]                                                    # show full transcript (default: current)
@@ -1003,7 +1006,9 @@ pcxa chat models                                                      # list ava
 }
 ```
 
-**How it works:** `chat send` submits a message, waits for the platform's assistant task to finish, and returns the assistant response. Exit code 2 means the task failed. `--no-wait` skips polling and returns the task ID immediately.
+**How it works:** `chat send` submits a message, waits for the platform's assistant task to finish, and returns the assistant response. Exit code 2 means the task failed; exit code 3 means a turn was already running on that conversation (the message names its task; wait, or send with `--new`). `--no-wait` skips polling and returns the task ID immediately.
+
+**Troubleshooting a turn (staff only).** `--trace` asks the server to record every keyword search the turn runs (which engine answered, how long it took, why Pinecone fell back) and adds a `trace` object to the output; in `--format table` it prints a timeline after the answer. `chat trace <agent_task_id>` reads it later, and works on any of your own turns, but search events exist only for turns sent with `--trace`. Tool outputs are sizes and keys unless you pass `--full`. Non-staff accounts get a 403, and staff can only trace their own turns.
 
 ## Audit Log (company admins)
 

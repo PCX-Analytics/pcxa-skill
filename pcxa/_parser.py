@@ -1458,6 +1458,14 @@ def build_parser():
     p.add_argument("--page-url", help="Optional context URL passed to the agent")
     p.add_argument("--no-wait", action="store_true", help="Return immediately with agent_task_id; don't poll")
     p.add_argument("--timeout", type=int, default=180, help="Polling timeout in seconds (default: 180)")
+    p.add_argument(
+        "--trace", action="store_true",
+        help="Staff only: record this turn's search events and print its trace after the answer",
+    )
+
+    p = chat_sub.add_parser("trace", help="Staff only: one turn's timings, steps and search events")
+    p.add_argument("agent_task_id", type=int, help="Agent task id (from `chat send`)")
+    p.add_argument("--full", action="store_true", help="Include stored tool inputs, outputs and thinking text")
 
     p = chat_sub.add_parser("ls", help="List conversations")
     p.add_argument("--search", help="Filter by title or message content")
