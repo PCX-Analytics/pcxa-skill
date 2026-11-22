@@ -80,6 +80,23 @@ def test_send_with_trace_asks_for_it_and_prints_the_timeline(capsys):
     assert "search_project_data: 2 calls, 3.1s, 1 errors" in out
 
 
+def test_a_server_without_the_trace_endpoint_still_returns_the_answer(capsys):
+    client = FakeClient()
+    real_get = client.get
+
+    def get(path, params=None, **kw):
+        if path.endswith("/trace/"):
+            raise HTTPError(FakeResponse(404, {}, reason="Not Found"))
+        return real_get(path, params, **kw)
+
+    client.get = get
+    cmd_chat_send(client, send_args(trace=True))
+
+    out = capsys.readouterr().out
+    assert "answer" in out
+    assert "trace unavailable (HTTP 404)" in out
+
+
 def test_send_without_trace_reads_no_trace():
     client = FakeClient()
 

@@ -103,7 +103,13 @@ def cmd_chat_send(client, args):
         "assistant_message": assistant_msg,
     }
     if getattr(args, "trace", False):
-        result["trace"] = client.get(f"agent-tasks/{task_id}/trace/")
+        # The answer is already in hand: a server without the trace endpoint (404)
+        # or a non-staff account (403) is reported, not raised.
+        try:
+            result["trace"] = client.get(f"agent-tasks/{task_id}/trace/")
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            result["trace_error"] = f"trace unavailable (HTTP {status})"
 
     if args.format == "table":
         print(f"Conversation: {conv_id}  Task: {task_id}  Status: {final_status}  Elapsed: {result['elapsed_seconds']}s")
@@ -130,6 +136,8 @@ def cmd_chat_send(client, args):
         if result.get("trace"):
             print()
             _print_trace(result["trace"])
+        elif result.get("trace_error"):
+            print(f"\n({result['trace_error']})")
     else:
         out_json(result)
 
