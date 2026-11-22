@@ -1008,6 +1008,13 @@ pcxa chat models                                                      # list ava
 
 **How it works:** `chat send` submits a message, waits for the platform's assistant task to finish, and returns the assistant response. Exit code 2 means the task failed; exit code 3 means a turn was already running on that conversation (the message names its task; wait, or send with `--new`). `--no-wait` skips polling and returns the task ID immediately.
 
+**Holding a conversation.** Start one with `--new` and keep its `conversation_id`, then send every follow-up with `--conversation <id>`. Each turn sees the earlier messages. Without either flag, `send` uses the user's most recent conversation, usually the one open in their browser chat, so an agent's questions would land in the middle of theirs. The CLI signs in as the user, so agent sessions also appear in their chat list. Send one turn at a time and wait for each answer: a second send while one runs exits 3. To review the thread, use `chat get <id> --show-tools`.
+
+```bash
+CID=$(pcxa chat send "Which submittals are overdue?" --new --title "Agent session" | jq .conversation_id)
+pcxa chat send "Which of those are for the pump package?" --conversation "$CID"
+```
+
 **Troubleshooting a turn (staff only).** `--trace` asks the server to record every keyword search the turn runs (which engine answered, how long it took, why Pinecone fell back) and adds a `trace` object to the output; in `--format table` it prints a timeline after the answer. `chat trace <agent_task_id>` reads it later, and works on any of your own turns, but search events exist only for turns sent with `--trace`. Tool outputs are sizes and keys unless you pass `--full`. Non-staff accounts get a 403, and staff can only trace their own turns.
 
 ## Audit Log (company admins)
